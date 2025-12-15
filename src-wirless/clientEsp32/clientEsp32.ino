@@ -1,107 +1,118 @@
 #include <WiFi.h>
 
-// dropar espNow per mandar indirizzo ip da server a client per permettergli di connettersi
+const char* ssid     = "RedPanda_AP";
+const char* password = "12345678";
 
-// ===== Wi-Fi configuration (must match the AP) =====
-const char* ssid     = "isma";
-const char* password = "ismaele04";
+IPAddress serverIP(192, 168, 4, 1);
+const int serverPort = 80;
 
-// Car ESP32 AP IP (default for softAP is usually 192.168.4.1)
-const char* host = "10.67.139.170";
-const int   port = 80;
-
-int targetSpeed  = 0;
-int targetAngle  = 0;
-int targetMode   = 0;  // 0=Manual
-
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-
-  Serial.println();
-  Serial.println("Steering ESP32 - HTTP Client");
+void connectToCarAP_strict() {
+  Serial.print("[STEERING] Connecting to SSID: ");
+  Serial.println(ssid);
 
   WiFi.mode(WIFI_STA);
+  WiFi.disconnect(true, true);
+  delay(500);
+
+  WiFi.setSleep(false);
+  WiFi.setAutoReconnect(true);
+
+  // Force DHCP (optional but helps)
+  WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE);
+
   WiFi.begin(ssid, password);
 
-  Serial.print("Connecting to AP");
   while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
     Serial.print(".");
+    delay(300);
   }
-  Serial.println("\nConnected!");
-  Serial.print("My IP: ");
+
+  Serial.println("\n[STEERING] WiFi connected!");
+  Serial.print("[STEERING] Local IP: ");
   Serial.println(WiFi.localIP());
+  Serial.print("[STEERING] Gateway: ");
+  Serial.println(WiFi.gatewayIP());
+  Serial.print("[STEERING] RSSI: ");
+  Serial.println(WiFi.RSSI());
 }
 
-void loop() {
-  // ---- Update fake commands (later: read from MSP432 via UART) ----
-  static int step = 0;
-  step++;
-
-  targetSpeed = (step * 5) % 100;        // 0..95
-  targetAngle = (step * 5) % 60 - 30;    // -30..29
-  targetMode  = 0;                       // Manual
-
-  // ---- Build the HTTP GET path with query string ----
-  String url = "/cmd?speed=" + String(targetSpeed) +
-               "&angle=" + String(targetAngle) +
-               "&mode=" + String(targetMode);
-
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.print(host);
-  Serial.print(":");
-  Serial.println(port);
-
+String httpGET(const String& path) {
   WiFiClient client;
-  if (!client.connect(host, port)) {
-    Serial.println("Connection failed");
-    delay(1000);
-    return;
+
+  const int maxTries = 3;
+  bool connected = false;
+  for (int i = 0; i < maxTries; i++) {
+    if (client.connect(serverIP, serverPort)) {
+      connected = true;
+      break;
+    }
+    delay(50);
   }
 
-  Serial.print("Requesting URL: ");
-  Serial.println(url);
+  if (!connected) return "";
 
-  // ---- Send HTTP GET request ----
-  client.print(String("GET ") + url + " HTTP/1.1\r\n");
-  client.print(String("Host: ") + host + "\r\n");
-  client.print("Connection: close\r\n");
-  client.print("\r\n");
+  client.print("GET " + path + " HTTP/1.1\r\n");
+  client.print("Host: 192.168.4.1\r\n");
+  client.print("Connection: close\r\n\r\n");
 
-  // ---- Read response ----
-  String responseHeaders;
-  String responseBody;
   bool headersEnded = false;
+  String body;
 
   unsigned long timeout = millis() + 2000;
-  while (client.connected() && millis() < timeout) {
-    while (client.available()) {
-      String line = client.readStringUntil('\n');
+  while ((client.connected() || client.available()) && millis() < timeout) {
+    if (!client.available()) continue;
 
-      if (!headersEnded) {
-        // HTTP headers end with a blank line
-        if (line == "\r" || line == "" || line == "\n") {
-          headersEnded = true;
-        } else {
-          responseHeaders += line;
-        }
-      } else {
-        responseBody += line;
-      }
+    String line = client.readStringUntil('\n');
+    line.replace("\r", "");
+
+    if (!headersEnded) {
+      if (line.length() == 0) headersEnded = true;
+    } else {
+      body += line;
     }
   }
 
   client.stop();
+  return body;
+}
 
-  Serial.println("=== Response Headers ===");
-  Serial.println(responseHeaders);
-  Serial.println("=== Response Body ===");
-  Serial.println(responseBody);
+void setup() {
+  Serial.begin(115200);
+  delay(800);
 
-  // Here you could parse the JSON (e.g. speed/temp/battery),
-  // using ArduinoJson or simple manual parsing if you want.
+  Serial.println("\n[STEERING] Starting OFFLINE HTTP client");
+  connectToCarAP_strict();
+}
 
-  delay(1000); // send command every second
+void loop() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[STEERING] WiFi dropped -> reconnecting...");
+    connectToCarAP_strict();
+  }
+
+  static int t = 0;
+  t++;
+
+  int speed = (t * 5) % 100;
+  int angle = (t * 3) % 60 - 30;
+  int mode  = 0;
+
+  String path = "/cmd?speed=" + String(speed) +
+                "&angle=" + String(angle) +
+                "&mode=" + String(mode);
+
+  Serial.print("[STEERING] GET ");
+  Serial.println(path);
+
+  String body = httpGET(path);
+
+  if (body.length() == 0) {
+    Serial.println("[STEERING] Server not reachable (no body)");
+    // If you want: force reconnect after N failures
+  } else {
+    Serial.print("[STEERING] Telemetry: ");
+    Serial.println(body);
+  }
+
+  delay(500);
 }

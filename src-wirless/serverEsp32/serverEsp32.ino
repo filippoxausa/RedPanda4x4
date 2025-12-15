@@ -1,172 +1,128 @@
 #include <WiFi.h>
 
-// ===== Wi-Fi configuration =====
-const char* ssid     = "isma";
-const char* password = "ismaele04";  // must be at least 8 chars
+const char* apSsid     = "RedPanda_AP";
+const char* apPassword = "12345678";
 
-// HTTP server on port 80
+IPAddress apIP(192, 168, 4, 1);
+IPAddress netmask(255, 255, 255, 0);
+
 WiFiServer server(80);
 
-// Fake telemetry state (later: replace with real data)
-int currentSpeed   = 42;
+int currentSpeed   = 0;
 int currentTemp    = 25;
-int currentBattery = 87;
+int currentBattery = 100;
 
-// Helper to extract integer parameter from URL query string
-// Example: url = "/cmd?speed=50&angle=-10&mode=1"
-// getIntParam(url, "speed", defaultVal) -> 50
-int getIntParam(const String& url, const String& name, int defaultVal) {
+int getIntParam(const String& url, const String& name, int def) {
   int idx = url.indexOf(name + "=");
-  if (idx == -1) return defaultVal;
-
-  int start = idx + name.length() + 1;
-  int end = url.indexOf('&', start);
-  if (end == -1) end = url.length();
-
-  String valStr = url.substring(start, end);
-  valStr.trim();
-  if (valStr.length() == 0) return defaultVal;
-
-  return valStr.toInt();
-}
-
-void waitForWiFi() {
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
-
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-
-  unsigned long startAttempt = millis();
-  const unsigned long timeout = 15000;  // 15 seconds
-
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(500);
-
-    if (millis() - startAttempt >= timeout) {
-      Serial.println("\nFailed to connect. Restarting WiFi module...");
-      WiFi.disconnect(true);
-      delay(1000);
-      WiFi.begin(ssid, password);
-      startAttempt = millis();  // Reset timer
-    }
-  }
-
-  Serial.println("\nWiFi connected!");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
+  if (idx < 0) return def;
+  int s = idx + name.length() + 1;
+  int e = url.indexOf('&', s);
+  if (e < 0) e = url.length();
+  return url.substring(s, e).toInt();
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  delay(800);
 
-  Serial.println();
-  Serial.println("Starting ESP32 Car - Access Point + HTTP Server");
+  Serial.println("\n[CAR] Starting OFFLINE AP + HTTP Server");
 
-  waitForWiFi();
+  WiFi.mode(WIFI_AP);
+  WiFi.softAPConfig(apIP, apIP, netmask);
+
+  bool ok = WiFi.softAP(apSsid, apPassword);
+  Serial.print("[CAR] softAP() result: ");
+  Serial.println(ok ? "OK" : "FAIL");
+
+  Serial.print("[CAR] AP SSID: ");
+  Serial.println(apSsid);
+  Serial.print("[CAR] AP IP: ");
+  Serial.println(WiFi.softAPIP());
 
   server.begin();
-  Serial.println("HTTP server started on port 80");
+  Serial.println("[CAR] HTTP server started on port 80");
 }
 
 void loop() {
-  WiFiClient client = server.available();
-  if (!client) {
-    // No client connected, nothing to do
-    return;
+  static unsigned long lastPrint = 0;
+  if (millis() - lastPrint > 2000) {
+    lastPrint = millis();
+    Serial.print("[CAR] Stations connected: ");
+    Serial.println(WiFi.softAPgetStationNum());
   }
 
-  Serial.println("Client connected");
+  WiFiClient client = server.available();
+  if (!client) return;
 
-  // ---- Read HTTP request ----
+  Serial.println("\n[CAR] Client connected");
+
   String requestLine;
-  String request;  // full request (for debugging, optional)
   bool firstLine = true;
 
-  // Wait until client sends data
-  unsigned long timeout = millis() + 2000; // 2s timeout
-  while (client.connected() && millis() < timeout) {
-    if (client.available()) {
-      String line = client.readStringUntil('\n');
-      line.trim();  // remove \r and spaces
-      if (firstLine) {
-        requestLine = line;
-        firstLine = false;
-      }
-      request += line + "\n";
+  unsigned long deadline = millis() + 2000;
+  while (client.connected() && millis() < deadline) {
+    if (!client.available()) continue;
 
-      // Empty line: end of headers
-      if (line.length() == 0) {
-        break;
-      }
+    String line = client.readStringUntil('\n');
+    line.replace("\r", "");
+
+    if (firstLine) {
+      requestLine = line;
+      firstLine = false;
     }
+
+    if (line.length() == 0) break;
   }
 
-  Serial.println("=== HTTP Request Start ===");
-  Serial.print(request);
-  Serial.println("=== HTTP Request End ===");
+  Serial.print("[CAR] ");
+  Serial.println(requestLine);
 
-  // ---- Parse request line: e.g. "GET /cmd?speed=50&angle=-10&mode=1 HTTP/1.1" ----
-  String method;
-  String url;
-  String version;
-
-  int firstSpace  = requestLine.indexOf(' ');
-  int secondSpace = requestLine.indexOf(' ', firstSpace + 1);
-
-  if (firstSpace != -1 && secondSpace != -1) {
-    method  = requestLine.substring(0, firstSpace);
-    url     = requestLine.substring(firstSpace + 1, secondSpace);
-    version = requestLine.substring(secondSpace + 1);
+  String method, url;
+  int s1 = requestLine.indexOf(' ');
+  int s2 = requestLine.indexOf(' ', s1 + 1);
+  if (s1 > 0 && s2 > s1) {
+    method = requestLine.substring(0, s1);
+    url    = requestLine.substring(s1 + 1, s2);
   }
 
-  Serial.print("Method: ");  Serial.println(method);
-  Serial.print("URL: ");     Serial.println(url);
-  Serial.print("Version: "); Serial.println(version);
-
-  // Only handle GET /cmd...
   if (method == "GET" && url.startsWith("/cmd")) {
-    // Extract parameters from query string
-    int speedCmd  = getIntParam(url, "speed", 0);
-    int angleCmd  = getIntParam(url, "angle", 0);
-    int modeCmd   = getIntParam(url, "mode", 0);
+    int speed = getIntParam(url, "speed", 0);
+    int angle = getIntParam(url, "angle", 0);
+    int mode  = getIntParam(url, "mode", 0);
 
-    Serial.print("Parsed command -> speed=");
-    Serial.print(speedCmd);
-    Serial.print(" angle=");
-    Serial.print(angleCmd);
-    Serial.print(" mode=");
-    Serial.println(modeCmd);
+    Serial.printf("[CAR] CMD speed=%d angle=%d mode=%d\n", speed, angle, mode);
 
-    // TODO: here you will apply these commands to your motor control logic
-
-    // For now, update some fake telemetry state for fun
-    currentSpeed   = speedCmd;               // pretend current speed follows command
-    currentTemp    = 25 + (speedCmd / 10);   // fake effect
+    // Fake telemetry update
+    currentSpeed   = speed;
+    currentTemp    = 25 + abs(angle) / 10;
     currentBattery = max(0, currentBattery - 1);
 
-    // ---- Build JSON response ----
     String json = "{";
     json += "\"status\":\"ok\",";
-    json += "\"speed\":" + String(currentSpeed) + ",";
-    json += "\"temp\":" + String(currentTemp) + ",";
+    json += "\"speed\":"   + String(currentSpeed) + ",";
+    json += "\"temp\":"    + String(currentTemp) + ",";
     json += "\"battery\":" + String(currentBattery);
     json += "}";
 
-    // ---- Send HTTP response ----
     client.println("HTTP/1.1 200 OK");
     client.println("Content-Type: application/json");
+    client.println("Access-Control-Allow-Origin: *");
     client.println("Connection: close");
     client.print("Content-Length: ");
     client.println(json.length());
     client.println();
     client.print(json);
+  } else if (method == "GET" && url == "/") {
+    String msg = "RedPanda Car Server OK\nTry /cmd?speed=50&angle=0&mode=0\n";
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-Type: text/plain");
+    client.println("Connection: close");
+    client.print("Content-Length: ");
+    client.println(msg.length());
+    client.println();
+    client.print(msg);
   } else {
-    // Unknown route -> 404
     String msg = "Not found\n";
-
     client.println("HTTP/1.1 404 Not Found");
     client.println("Content-Type: text/plain");
     client.println("Connection: close");
@@ -176,8 +132,7 @@ void loop() {
     client.print(msg);
   }
 
-  // Give some time to flush
-  delay(10);
+  delay(5);
   client.stop();
-  Serial.println("Client disconnected");
+  Serial.println("[CAR] Client disconnected");
 }
