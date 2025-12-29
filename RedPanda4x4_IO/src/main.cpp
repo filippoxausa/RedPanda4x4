@@ -1,103 +1,93 @@
 #include <Arduino.h>
+#include <Wire.h>
+#include "motor_tb.h"
 
-// ================== PIN TB6612 (modifica qui) ==================
-// Canale A
-static const int PIN_AIN1 = 14;
-static const int PIN_AIN2 = 27;
-static const int PIN_PWMA = 26;
+static const uint8_t MPU_ADDR = 0x68;     // prova 0x69 se non funziona [web:29]
+static const uint8_t REG_WHO_AM_I = 0x75; // [web:29]
+static const uint8_t REG_PWR_MGMT_1 = 0x6B;
+static const uint8_t REG_ACCEL_XOUT_H = 0x3B; // accel block starts here [web:50]
 
-// Canale B
-static const int PIN_BIN1 = 16;
-static const int PIN_BIN2 = 17;
-static const int PIN_PWMB = 4;
-
-static const int PIN_STBY = 25;   // standby/enable
-
-// ================== PWM (LEDC) ==================
-static const int PWM_FREQ = 20000;
-static const int PWM_RES  = 8;      // duty 0..255
-
-static const int CH_A = 0;
-static const int CH_B = 1;
-
-void motorEnable(bool en) {
-  digitalWrite(PIN_STBY, en ? HIGH : LOW); // STBY HIGH abilita [web:54]
+static uint8_t i2cRead8(uint8_t addr, uint8_t reg) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.endTransmission(false);            // repeated start pattern [web:43]
+  Wire.requestFrom((int)addr, 1);
+  return Wire.available() ? Wire.read() : 0xFF;
 }
 
-void driveMotor(int in1, int in2, int pwmCh, int speed) {
-  // speed: -255..+255
-  speed = constrain(speed, -255, 255);
-
-  if (speed > 0) {
-    digitalWrite(in1, HIGH);
-    digitalWrite(in2, LOW);
-    ledcWrite(pwmCh, speed);
-  } else if (speed < 0) {
-    digitalWrite(in1, LOW);
-    digitalWrite(in2, HIGH);
-    ledcWrite(pwmCh, -speed);
-  } else {
-    // coast
-    digitalWrite(in1, LOW);
-    digitalWrite(in2, LOW);
-    ledcWrite(pwmCh, 0);
-  }
+static void i2cWrite8(uint8_t addr, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  Wire.endTransmission(true);
 }
 
-void driveA(int speed) { driveMotor(PIN_AIN1, PIN_AIN2, CH_A, speed); }
-void driveB(int speed) { driveMotor(PIN_BIN1, PIN_BIN2, CH_B, speed); }
+static bool i2cReadBytes(uint8_t addr, uint8_t startReg, uint8_t *buf, size_t len) {
+  Wire.beginTransmission(addr);
+  Wire.write(startReg);
+  if (Wire.endTransmission(false) != 0) return false; // repeated start [web:43]
+  size_t n = Wire.requestFrom((int)addr, (int)len);
+  if (n != len) return false;
+  for (size_t i = 0; i < len; i++) buf[i] = Wire.read();
+  return true;
+}
 
-void brakeAll() {
-  // short brake su entrambi: IN1=IN2=HIGH, PWM=0
-  digitalWrite(PIN_AIN1, HIGH);
-  digitalWrite(PIN_AIN2, HIGH);
-  ledcWrite(CH_A, 0);
-
-  digitalWrite(PIN_BIN1, HIGH);
-  digitalWrite(PIN_BIN2, HIGH);
-  ledcWrite(CH_B, 0);
+static int16_t toInt16(uint8_t hi, uint8_t lo) {
+  return (int16_t)((hi << 8) | lo);
 }
 
 void setup() {
-  // Direzioni
-  pinMode(PIN_AIN1, OUTPUT);
-  pinMode(PIN_AIN2, OUTPUT);
-  pinMode(PIN_BIN1, OUTPUT);
-  pinMode(PIN_BIN2, OUTPUT);
-  pinMode(PIN_STBY, OUTPUT);
+  Serial.begin(115200);
+  delay(200);
 
-  // PWM: ogni pin ha il suo canale
-  ledcSetup(CH_A, PWM_FREQ, PWM_RES);
-  ledcAttachPin(PIN_PWMA, CH_A);
+  // I2C ESP32: SDA=21 SCL=22 (setup esplicito consigliato su ESP32)
+  Wire.begin(21, 22);
+  Wire.setClock(400000);
 
-  ledcSetup(CH_B, PWM_FREQ, PWM_RES);
-  ledcAttachPin(PIN_PWMB, CH_B);
+  motorsInit();
 
-  ledcWrite(CH_A, 0);
-  ledcWrite(CH_B, 0);
+  // Wake-up MPU: PWR_MGMT_1 = 0
+  i2cWrite8(MPU_ADDR, REG_PWR_MGMT_1, 0x00);
 
-  motorEnable(true);
-  driveA(0);
-  driveB(0);
+  uint8_t who = i2cRead8(MPU_ADDR, REG_WHO_AM_I);
+  Serial.print("WHO_AM_I=0x");
+  Serial.println(who, HEX);
+
+  // MPU-6500 tipicamente 0x70 [web:29]
+  if (who != 0x70) {
+    Serial.println("ATTENZIONE: WHO_AM_I diverso da 0x70. Prova MPU_ADDR=0x69 o controlla cablaggi.");
+  }
 }
 
 void loop() {
-  // Entrambi avanti
-  driveA(180);
-  driveB(180);
-  delay(1500);
+  uint8_t raw[6];
+  if (!i2cReadBytes(MPU_ADDR, REG_ACCEL_XOUT_H, raw, sizeof(raw))) {
+    driveA(0);
+    driveB(0);
+    delay(50);
+    return;
+  }
 
-  // Stop
-  driveA(0);
-  driveB(0);
-  delay(400);
+  int16_t ax = toInt16(raw[0], raw[1]);
+  int16_t ay = toInt16(raw[2], raw[3]);
+  int16_t az = toInt16(raw[4], raw[5]);
 
-  // Entrambi indietro
-  driveA(180);
-  driveB(180);
-  delay(1500);
+  Serial.print("Axyz raw: ");
+  Serial.print(ax); Serial.print('\t');
+  Serial.print(ay); Serial.print('\t');
+  Serial.println(az);
 
-  // Freno
-  brakeAll();
-  delay(600);
+  // Logica richiesta su asse Y
+  if (ay > 10000) {
+    driveA(180);
+    driveB(180);
+  } else if (ay < -10000) {
+    driveA(-180);
+    driveB(-180);
+  } else {
+    driveA(0);
+    driveB(0);
+  }
+
+  delay(50);
 }
