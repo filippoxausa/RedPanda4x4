@@ -1,0 +1,65 @@
+<!doctype html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    body{font-family:system-ui; display:flex; justify-content:center; align-items:center; height:100vh; margin:0;}
+    .wrap{display:flex; flex-direction:column; align-items:center; gap:12px;}
+    .pad{display:grid; grid-template-columns:110px 110px 110px; grid-template-rows:110px 110px 110px; gap:14px;}
+    button{
+      font-size:42px; border-radius:22px; border:none;
+      box-shadow:0 6px 18px rgba(0,0,0,.15);
+      user-select:none; -webkit-user-select:none;
+      touch-action:none;
+    }
+    .empty{visibility:hidden;}
+    #status{margin:0; font-size:16px; opacity:.7;}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="pad">
+      <div class="empty"></div>
+      <button id="up">↑</button>
+      <div class="empty"></div>
+
+      <button id="left">←</button>
+      <div class="empty"></div>
+      <button id="right">→</button>
+
+      <div class="empty"></div>
+      <button id="down">↓</button>
+      <div class="empty"></div>
+    </div>
+    <p id="status">CMD: S</p>
+  </div>
+
+<script>
+  async function send(cmd){
+    document.getElementById("status").innerText = "CMD: " + cmd;
+    try { await fetch("/cmd?d="+cmd, {cache:"no-store"}); } catch(e){}
+  }
+
+  // press&hold -> cmd ; release -> S
+  function bindHold(id, cmd){
+    const el = document.getElementById(id);
+
+    const down = (e)=>{ e.preventDefault(); send(cmd); };
+    const up   = (e)=>{ e.preventDefault(); send('S'); };
+
+    el.addEventListener("touchstart", down, {passive:false});
+    el.addEventListener("touchend",   up,   {passive:false});
+    el.addEventListener("touchcancel",up,   {passive:false});
+
+    el.addEventListener("mousedown", down);
+    el.addEventListener("mouseup",   up);
+    el.addEventListener("mouseleave",up);
+  }
+
+  bindHold("up", "F");
+  bindHold("down", "B");
+  bindHold("left", "L");
+  bindHold("right", "R");
+</script>
+</body>
+</html>
