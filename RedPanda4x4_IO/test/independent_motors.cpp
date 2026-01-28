@@ -83,8 +83,8 @@ void setup() {
 
 void loop() {
   // Entrambi avanti
-  driveA(180);
-  driveB(180);
+  driveA(255);
+  driveB(255);
   delay(1500);
 
   // Stop
@@ -93,8 +93,8 @@ void loop() {
   delay(400);
 
   // Entrambi indietro
-  driveA(-180);
-  driveB(-180);
+  driveA(-255);
+  driveB(-255);
   delay(1500);
 
   // Freno
