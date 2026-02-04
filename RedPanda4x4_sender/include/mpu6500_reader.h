@@ -5,13 +5,16 @@
 class Mpu6500Reader {
 public:
   bool begin(uint8_t mpuAddr = 0x68, int sda = 21, int scl = 22, uint32_t clk = 400000);
-  bool readAccel(ControlMsg &out);
+
+  bool readAccel(ControlMsg &out);        // già c’era
+  bool readGyroZRaw(int16_t &gzRaw);      // <-- NUOVO
 
 private:
   uint8_t addr_ = 0x68;
 
   static constexpr uint8_t REG_PWR_MGMT_1   = 0x6B;
   static constexpr uint8_t REG_ACCEL_XOUT_H = 0x3B;
+  static constexpr uint8_t REG_GYRO_ZOUT_H  = 0x47; // <-- NUOVO
 
   void write8(uint8_t reg, uint8_t val);
   bool readBytes(uint8_t startReg, uint8_t *buf, size_t len);
