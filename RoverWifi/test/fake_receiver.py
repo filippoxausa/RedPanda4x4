@@ -1,4 +1,10 @@
-<!doctype html>
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import urlparse, parse_qs
+import time
+
+last = {"x": 0, "y": 0, "z": 0, "t": time.time()}
+
+INDEX_HTML = r"""<!doctype html>
 <html>
 <head>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
@@ -29,8 +35,7 @@
 <body>
   <div class="wrap">
     <div class="cam">
-      <!-- Cambia qui l'URL della camera se serve -->
-      <iframe src="http://192.168.1.103"></iframe>
+      <iframe id="cam"></iframe>
     </div>
 
     <div class="pad">
@@ -52,7 +57,11 @@
   </div>
 
 <script>
-  const FULL = 16000; 
+  const FULL = 16000;
+
+  // ✅ Fake-cam: usa lo stesso host della pagina ma porta 8081
+  // Esempio: se apri http://172.20.10.3:8080, allora iframe -> http://172.20.10.3:8081
+  document.getElementById("cam").src = "http://" + location.hostname + ":8081";
 
   async function sendXYZ(x, y, z=0){
     document.getElementById("status").innerText = `X=${x} Y=${y} Z=${z}`;
@@ -75,10 +84,48 @@
     el.addEventListener("mouseleave",up);
   }
 
+  // Mapping direzioni -> (X,Y)
   bindHoldXYZ("up",    0,  FULL);
   bindHoldXYZ("down",  0, -FULL);
   bindHoldXYZ("left", -FULL, 0);
   bindHoldXYZ("right", FULL, 0);
 </script>
 </body>
-</html>
+</html>"""
+
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        p = urlparse(self.path)
+        if p.path == "/":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(INDEX_HTML.encode("utf-8"))
+            return
+
+        if p.path == "/cmd":
+            q = parse_qs(p.query)
+            x = int(q.get("x", ["0"])[0])
+            y = int(q.get("y", ["0"])[0])
+            z = int(q.get("z", ["0"])[0])
+            last["x"], last["y"], last["z"] = x, y, z
+            last["t"] = time.time()
+            print(f"CMD: x={x} y={y} z={z}")
+            self.send_response(200); self.end_headers()
+            self.wfile.write(b"ok")
+            return
+
+        if p.path == "/status":
+            age = int((time.time() - last["t"]) * 1000)
+            body = f'{{"x":{last["x"]},"y":{last["y"]},"z":{last["z"]},"age_ms":{age}}}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body.encode("utf-8"))
+            return
+
+        self.send_response(404); self.end_headers()
+
+if __name__ == "__main__":
+    print("Fake receiver on http://0.0.0.0:8080")
+    HTTPServer(("0.0.0.0", 8080), H).serve_forever()
