@@ -7,27 +7,34 @@
 // =======================================================
 //                    UART -> CYD (monitor)
 // =======================================================
-static const int UART_TX = 17;   // TX sender -> RX CYD (GPIO27)
-static const int UART_RX = -1;   // non usato
+static const int UART_TX = 17;
+static const int UART_RX = -1;
 HardwareSerial Link(2);
 
 // =======================================================
-//                       JOYSTICK
+//                       JOYSTICK 1 (DRIVE)
 // =======================================================
 static const int PIN_VRX = 34;   // ADC1
 static const int PIN_VRY = 35;   // ADC1
-static const int PIN_SW  = 33;   // button (LOW = premuto)
+static const int PIN_SW  = 33;   // LOW=pressed
+
+// =======================================================
+//                       JOYSTICK 2 (CAM PAN)
+// =======================================================
+static const int PIN2_VRX = 32;  // ADC1 (OK with WiFi)
+// opzionale: pulsante per centrare cam
+static const int PIN2_SW  = 13;  // LOW=pressed (se non collegato, lascia così)
 
 // =======================================================
 //                      MPU6500 (I2C)
 // =======================================================
-static const uint8_t MPU_ADDR = 0x68; // AD0=GND
+static const uint8_t MPU_ADDR = 0x68;
 static const uint8_t REG_WHO_AM_I    = 0x75;
 static const uint8_t REG_PWR_MGMT_1  = 0x6B;
 static const uint8_t REG_GYRO_CONFIG = 0x1B;
 static const uint8_t REG_GYRO_ZOUT_H = 0x47;
 
-static const float GYRO_SENS_250 = 131.0f; // LSB/(deg/s) @ ±250 dps
+static const float GYRO_SENS_250 = 131.0f;
 static float headingDeg = 0.0f;
 
 // =======================================================
@@ -35,7 +42,6 @@ static float headingDeg = 0.0f;
 // =======================================================
 static const uint8_t RX_MAC[6] = { 0xE0,0x8C,0xFE,0x2E,0x96,0x7C };
 
-// Struct IDENTICA a quella del receiver
 typedef struct __attribute__((packed)) {
   int16_t ax, ay, az;
 } ControlMsg;
@@ -66,9 +72,9 @@ static bool i2cReadBytes(uint8_t addr, uint8_t reg, uint8_t* data, size_t len) {
 }
 
 static bool mpuInit() {
-  if (!i2cWriteByte(MPU_ADDR, REG_PWR_MGMT_1, 0x00)) return false; // wake
+  if (!i2cWriteByte(MPU_ADDR, REG_PWR_MGMT_1, 0x00)) return false;
   delay(50);
-  if (!i2cWriteByte(MPU_ADDR, REG_GYRO_CONFIG, 0x00)) return false; // ±250 dps
+  if (!i2cWriteByte(MPU_ADDR, REG_GYRO_CONFIG, 0x00)) return false;
   delay(10);
 
   uint8_t who = 0;
@@ -87,64 +93,58 @@ static bool readGyroZ(int16_t &gzRaw) {
 // =======================================================
 //                      Modalità
 // =======================================================
-enum Mode : uint8_t {
-  MODE_JOYSTICK = 1,
-  MODE_GYRO     = 2
-};
-
+enum Mode : uint8_t { MODE_JOYSTICK = 1, MODE_GYRO = 2 };
 static Mode g_mode = MODE_JOYSTICK;
 
-// Debounce button (toggle su fronte)
 static bool     g_btnPrev = false;
 static uint32_t g_btnT0   = 0;
 static const uint32_t BTN_DEBOUNCE_MS = 120;
 
-// =======================================================
-//                 Helpers mappa e direzione
-// =======================================================
 static int clampInt(int v, int lo, int hi) {
   if (v < lo) return lo;
   if (v > hi) return hi;
   return v;
 }
 
-// direzione testuale in base a uno "steer" (-100..100)
 static const char* dirTextFromSteer(int steer) {
   if (steer > 15)  return "RIGHT";
   if (steer < -15) return "LEFT";
   return "STRAIGHT";
 }
 
-// =======================================================
-//                         SETUP
-// =======================================================
+static int deadzone100(int v, int dz) {
+  if (abs(v) <= dz) return 0;
+  return (v > 0) ? (v - dz) : (v + dz);
+}
+
 void setup() {
   Serial.begin(115200);
   delay(300);
 
-  // Joystick ADC
+  // joystick 1
   pinMode(PIN_SW, INPUT_PULLUP);
+
+  // joystick 2 (SW opzionale)
+  pinMode(PIN2_SW, INPUT_PULLUP);
+
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
 
-  // UART2 -> CYD (monitor)
   Link.begin(115200, SERIAL_8N1, UART_RX, UART_TX);
-  Serial.println("[SENDER] UART2->CYD: D,mode,btn,yaw,head,dir");
+  Serial.println("[SENDER] D,mode,btn,yaw,head,dir");
 
-  // I2C + MPU
   Wire.begin(21, 22);
   Wire.setClock(400000);
   if (!mpuInit()) Serial.println("[MPU] Init FAILED");
   else            Serial.println("[MPU] Init OK");
 
-  // ESP-NOW
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
   Serial.print("[ESP-NOW] TX STA MAC: ");
   Serial.println(WiFi.macAddress());
 
   if (esp_now_init() != ESP_OK) {
-    Serial.println("[ESP-NOW] Error initializing ESP-NOW");
+    Serial.println("[ESP-NOW] init failed");
     while (true) delay(1000);
   }
   esp_now_register_send_cb(onSent);
@@ -155,16 +155,13 @@ void setup() {
   peer.encrypt = false;
 
   if (esp_now_add_peer(&peer) != ESP_OK) {
-    Serial.println("[ESP-NOW] esp_now_add_peer failed");
+    Serial.println("[ESP-NOW] add_peer failed");
     while (true) delay(1000);
   }
 
-  Serial.println("[SENDER] Ready: MODE toggle on joystick button");
+  Serial.println("[SENDER] Ready: SW1 toggles mode, SW2 (GPIO13) centers cam (optional)");
 }
 
-// =======================================================
-//                          LOOP
-// =======================================================
 void loop() {
   static uint32_t lastMs = millis();
   uint32_t now = millis();
@@ -172,101 +169,82 @@ void loop() {
   if (dt <= 0) dt = 0.02f;
   lastMs = now;
 
-  // ---- Leggi joystick ----
+  // ---- joystick 1 ----
   int xRaw = analogRead(PIN_VRX);
   int yRaw = analogRead(PIN_VRY);
   bool btnPressed = (digitalRead(PIN_SW) == LOW);
 
-  // ---- Toggle modalità su fronte (debounce) ----
-  if (btnPressed != g_btnPrev) {
-    g_btnPrev = btnPressed;
-    g_btnT0 = now;
-  }
-  // se stabile e appena premuto (LOW) -> toggle
+  // toggle mode
+  if (btnPressed != g_btnPrev) { g_btnPrev = btnPressed; g_btnT0 = now; }
   if ((now - g_btnT0) > BTN_DEBOUNCE_MS) {
     static bool lastStable = false;
     if (btnPressed != lastStable) {
       lastStable = btnPressed;
-      if (lastStable) { // transizione a premuto
-        g_mode = (g_mode == MODE_JOYSTICK) ? MODE_GYRO : MODE_JOYSTICK;
-        Serial.printf("[MODE] -> %s\n", (g_mode == MODE_JOYSTICK) ? "JOYSTICK" : "GYRO");
-      }
+      if (lastStable) g_mode = (g_mode == MODE_JOYSTICK) ? MODE_GYRO : MODE_JOYSTICK;
     }
   }
 
-  int btn = btnPressed ? 1 : 0;
-
-  // ---- Gyro Z -> yaw + heading ----
   int16_t gzRaw = 0;
   float yawDps = 0.0f;
-
   if (readGyroZ(gzRaw)) {
     yawDps = (float)gzRaw / GYRO_SENS_250;
-    if (fabsf(yawDps) < 1.5f) yawDps = 0.0f; // deadband gyro
-
+    if (fabsf(yawDps) < 1.5f) yawDps = 0.0f;
     headingDeg += yawDps * dt;
     if (headingDeg > 180.0f) headingDeg -= 360.0f;
     if (headingDeg < -180.0f) headingDeg += 360.0f;
-  } else {
-    yawDps = 0.0f;
   }
 
-  // ---- Mappa joystick come sul monitor (-100..100) ----
   int xMapped = map(xRaw, 0, 4095, -100, 100);
   int yMapped = map(yRaw, 0, 4095, -100, 100);
 
-  // ---- Scegli cosa inviare via ESP-NOW in base alla modalità ----
-  // Manteniamo il tuo scaling *162 (come nel codice attuale)
+  // ---- joystick 2 (PAN) on GPIO32 ----
+  int camRawX = analogRead(PIN2_VRX);
+  int camMappedX = map(camRawX, 0, 4095, -100, 100);
+  camMappedX = deadzone100(camMappedX, 8);
+
+  // SW2 optional -> center camera
+  bool camCenterPressed = (digitalRead(PIN2_SW) == LOW);
+  if (camCenterPressed) camMappedX = 0;
+
+  // ---- choose ax/ay based on mode ----
   const int SCALE = 162;
 
-  int steer = 0;     // -100..100 (per direzione testo)
+  int steer = 0;
   int outAx = 0;
   int outAy = 0;
 
   if (g_mode == MODE_JOYSTICK) {
-    // Mode 1: joystick -> ax, ay
     steer = xMapped;
     outAx = xMapped;
     outAy = yMapped;
   } else {
-    // Mode 2: gyro -> sterzo, joystick Y -> throttle
-    // Converti yawDps in range -100..100 (regola a gusto)
-    // Con 120 dps saturi a 100.
     const float YAW_MAX_DPS = 120.0f;
     int yawMapped = (int)lroundf((yawDps / YAW_MAX_DPS) * 100.0f);
     yawMapped = clampInt(yawMapped, -100, 100);
-
     steer = yawMapped;
-    outAx = yawMapped;  // ax = "sterzo da gyro"
-    outAy = yMapped;    // ay = avanti/indietro da joystick
+    outAx = yawMapped;
+    outAy = yMapped;
   }
 
+  int outAz = camMappedX; // camera pan
+
   const char* dirTxt = dirTextFromSteer(steer);
-
-  // ---- UART al monitor (nuovo formato) ----
-  // D,mode,btn,yaw,head,dir
   Link.printf("D,%d,%d,%.1f,%.1f,%s\n",
-              (int)g_mode, btn, yawDps, headingDeg, dirTxt);
+              (int)g_mode, (btnPressed ? 1 : 0), yawDps, headingDeg, dirTxt);
 
-  // ---- ESP-NOW send a 20 Hz ----
+  // ---- send 20 Hz ----
   static uint32_t lastSendMs = 0;
-  const uint32_t SEND_PERIOD_MS = 50;
-
-  if (now - lastSendMs >= SEND_PERIOD_MS) {
+  if (now - lastSendMs >= 50) {
     lastSendMs = now;
 
     ControlMsg msg;
     msg.ax = (int16_t)(outAx * SCALE);
     msg.ay = (int16_t)(outAy * SCALE);
-    msg.az = 0;
+    msg.az = (int16_t)(outAz * SCALE);
 
-    esp_err_t err = esp_now_send(RX_MAC, (uint8_t*)&msg, sizeof(msg));
-    if (err != ESP_OK) {
-      Serial.printf("[ESP-NOW] send error=%d\n", (int)err);
-    }
+    esp_now_send(RX_MAC, (uint8_t*)&msg, sizeof(msg));
 
-    Serial.printf("[TX] mode=%d btn=%d | outAx=%d outAy=%d (scaled ax=%d ay=%d) | yaw=%.1f head=%.1f dir=%s\n",
-                  (int)g_mode, btn, outAx, outAy, (int)msg.ax, (int)msg.ay, yawDps, headingDeg, dirTxt);
+    Serial.printf("[TX] ax=%d ay=%d az=%d\n", (int)msg.ax, (int)msg.ay, (int)msg.az);
   }
 
   delay(5);
