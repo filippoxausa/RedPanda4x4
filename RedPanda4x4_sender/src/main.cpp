@@ -1,232 +1,201 @@
 #include <Arduino.h>
 #include <WiFi.h>
-#include "control_msg.h"
-#include "mpu6500_reader.h"
-#include "espnow_sender.h"
+#include <esp_wifi.h>
 #include <math.h>
 
-// ================= UART -> CYD =================
+#include "control_msg.h"
+#include "joystick.h"
+#include "mpu6500_reader.h"
+#include "espnow_sender.h"
+
+// =======================================================
+//                    UART -> CYD (monitor)
+// =======================================================
 static const int UART_TX = 17;
 static const int UART_RX = -1;
 HardwareSerial Link(2);
 
-// ================= Peer MAC (receiver) =========
+// =======================================================
+//                       ESP-NOW
+// =======================================================
 static const uint8_t RX_MAC[6] = { 0xE0,0x8C,0xFE,0x2E,0x96,0x7C };
+static const uint8_t ESPNOW_CH = 1;
 
-// ================= Joystick pins ===============
-static const int PIN_VRX = 34;   // joy1 X
-static const int PIN_VRY = 35;   // joy1 Y
-static const int PIN_SW  = 33;   // joy1 button (mode toggle)
-
-static const int PIN2_VRX = 32;  // joy2 X (cam pan)
-static const int PIN2_SW  = 13;  // joy2 button (center cam) optional
-
-// ================= MPU ==========================
-static const uint8_t MPU_ADDR = 0x68;
-static const float GYRO_SENS_250 = 131.0f; // raw/131 = dps
-
+// =======================================================
+//                     Peripherals
+// =======================================================
+static DriveJoystick driveJoy;
+static CamJoystick   camJoy;
 static Mpu6500Reader mpu;
-static EspNowSender nowTx;
+static EspNowSender  nowTx;
 
-// ================= Mode =========================
-enum Mode : uint8_t { MODE_JOYSTICK = 1, MODE_GYRO = 2 };
+// =======================================================
+//                   Mode (3 states)
+// =======================================================
+enum Mode : uint8_t { MODE_JOYSTICK = 1, MODE_TILT = 2, MODE_AUTO = 3 };
 static Mode g_mode = MODE_JOYSTICK;
 
+// debounce SW1
 static bool     g_btnPrev = false;
 static uint32_t g_btnT0   = 0;
 static const uint32_t BTN_DEBOUNCE_MS = 120;
 
-// ================= Calibration ==================
-static int x1Center = 2048, y1Center = 2048, x2Center = 2048;
-static float headingDeg = 0.0f;
-
-// ---- helpers ----
-static int clamp100(int v) {
-  if (v < -100) return -100;
-  if (v >  100) return  100;
-  return v;
-}
-
-static int applyDeadzone100(int v, int dz) {
-  if (v > -dz && v < dz) return 0;
-  return v;
-}
-
-static int mapRelTo100(int raw, int center) {
-  int d = raw - center;
-  if (d >= 0) {
-    int denom = (4095 - center);
-    if (denom <= 0) return 0;
-    return (int)lroundf((d * 100.0f) / denom);
-  } else {
-    int denom = center;
-    if (denom <= 0) return 0;
-    return (int)lroundf((d * 100.0f) / denom);
-  }
-}
-
-static int clampInt(int v, int lo, int hi) {
-  if (v < lo) return lo;
-  if (v > hi) return hi;
-  return v;
-}
-
+// =======================================================
+//                  Display helpers
+// =======================================================
 static const char* dirTextFromSteer(int steer) {
-  if (steer > 15)  return "RIGHT";
-  if (steer < -15) return "LEFT";
+  if (steer > 2400)  return "RIGHT";
+  if (steer < -2400) return "LEFT";
   return "STRAIGHT";
 }
 
-static void calibrateCenters() {
-  const int N = 200;
-  long sx1 = 0, sy1 = 0, sx2 = 0;
-
-  // warmup ADC
-  for (int i = 0; i < 20; i++) {
-    (void)analogRead(PIN_VRX);
-    (void)analogRead(PIN_VRY);
-    (void)analogRead(PIN2_VRX);
-    delay(2);
-  }
-
-  for (int i = 0; i < N; i++) {
-    sx1 += analogRead(PIN_VRX);
-    sy1 += analogRead(PIN_VRY);
-    sx2 += analogRead(PIN2_VRX);
-    delay(2);
-  }
-
-  x1Center = (int)(sx1 / N);
-  y1Center = (int)(sy1 / N);
-  x2Center = (int)(sx2 / N);
-
-  Serial.printf("[CAL] joy1 center x=%d y=%d | joy2 center x=%d\n", x1Center, y1Center, x2Center);
+static const char* modeText(uint8_t m) {
+  if (m == MODE_TILT) return "TILT";
+  if (m == MODE_AUTO) return "AUTO";
+  return "JOY";
 }
 
+// =======================================================
+//                        setup()
+// =======================================================
 void setup() {
   Serial.begin(115200);
-  delay(200);
-
-  pinMode(PIN_SW, INPUT_PULLUP);
-  pinMode(PIN2_SW, INPUT_PULLUP);
+  delay(300);
 
   analogReadResolution(12);
   analogSetAttenuation(ADC_11db);
 
-  Serial.println("[CAL] Calibrating centers... DO NOT touch sticks");
-  calibrateCenters();
+  // Joysticks (pin VRX, VRY, SW, deadzone)
+  driveJoy.begin(34, 35, 33, 1300);
+  driveJoy.calibrateCenter();
 
+  camJoy.begin(32, 13, 1300);
+
+  // UART -> CYD monitor
   Link.begin(115200, SERIAL_8N1, UART_RX, UART_TX);
+  Serial.println("[SENDER] UART: D,mode,btn,pitch,roll,dir");
 
+  // MPU6500
+  if (!mpu.begin(0x68, 21, 22, 400000)) {
+    Serial.println("[MPU] Init FAILED");
+  } else {
+    Serial.println("[MPU] Init OK");
+    mpu.calibrate(2000);
+  }
+
+  // WiFi + ESP-NOW
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
 
-  Serial.print("[ESP] TX STA MAC: ");
+  Serial.print("[ESP-NOW] TX STA MAC: ");
   Serial.println(WiFi.macAddress());
 
-  // MPU: usa clock più stabile (100k). Se vuoi, poi risali.
-  mpu.begin(MPU_ADDR, 21, 22, 100000);
-
-  if (!nowTx.begin(RX_MAC)) {
+  if (!nowTx.begin(RX_MAC, ESPNOW_CH)) {
     Serial.println("[ESP-NOW] init/peer failed");
     while (true) delay(1000);
   }
 
-  Serial.println("[SENDER] Ready: SW1 toggles mode, SW2 centers cam (optional)");
+  Serial.println("[SENDER] Ready: SW1 cycles JOY->TILT->AUTO, SW2 centers cam");
 }
 
+// =======================================================
+//                        loop()
+// =======================================================
 void loop() {
   static uint32_t lastMs = millis();
   uint32_t now = millis();
   float dt = (now - lastMs) / 1000.0f;
-  if (dt <= 0) dt = 0.02f;
+  if (dt <= 0.0f) dt = 0.01f;
+  if (dt > 0.1f)  dt = 0.1f;
   lastMs = now;
 
-  // ---- joystick 1 raw ----
-  int xRaw = analogRead(PIN_VRX);
-  int yRaw = analogRead(PIN_VRY);
-  bool btnPressed = (digitalRead(PIN_SW) == LOW);
+  // ---- Read peripherals ----
+  driveJoy.update();
+  camJoy.update();
+  bool imuOk = mpu.updateAngles(dt);
 
-  // toggle mode debounce
+  bool btnPressed = driveJoy.button();
+
+  // ---- Mode toggle on press (debounce) ----
   if (btnPressed != g_btnPrev) { g_btnPrev = btnPressed; g_btnT0 = now; }
   if ((now - g_btnT0) > BTN_DEBOUNCE_MS) {
     static bool lastStable = false;
     if (btnPressed != lastStable) {
       lastStable = btnPressed;
-      if (lastStable) g_mode = (g_mode == MODE_JOYSTICK) ? MODE_GYRO : MODE_JOYSTICK;
+      if (lastStable) {
+        if (g_mode == MODE_JOYSTICK)     g_mode = MODE_TILT;
+        else if (g_mode == MODE_TILT)    g_mode = MODE_AUTO;
+        else                             g_mode = MODE_JOYSTICK;
+        Serial.print("[MODE] -> ");
+        Serial.println(modeText(g_mode));
+      }
     }
   }
 
-  // ---- gyro Z ----
-  float yawDps = 0.0f;
-  int16_t gzRaw = 0;
-  if (mpu.readGyroZRaw(gzRaw)) {
-    yawDps = (float)gzRaw / GYRO_SENS_250;
-    if (fabsf(yawDps) < 1.5f) yawDps = 0.0f;
+  float pitchNow = mpu.pitchDeg();
+  float rollNow  = mpu.rollDeg();
 
-    headingDeg += yawDps * dt;
-    if (headingDeg > 180.0f) headingDeg -= 360.0f;
-    if (headingDeg < -180.0f) headingDeg += 360.0f;
-  } else {
-    yawDps = 0.0f;
-  }
-
-  // ---- joystick 1 mapped (relative + deadzone) ----
-  int xMapped = clamp100(mapRelTo100(xRaw, x1Center));
-  int yMapped = clamp100(mapRelTo100(yRaw, y1Center));
-  xMapped = applyDeadzone100(xMapped, 6);
-  yMapped = applyDeadzone100(yMapped, 6);
-
-  // ---- joystick 2 (cam pan) ----
-  int camRawX = analogRead(PIN2_VRX);
-  int camMappedX = clamp100(mapRelTo100(camRawX, x2Center));
-  camMappedX = applyDeadzone100(camMappedX, 8);
-
-  bool camCenterPressed = (digitalRead(PIN2_SW) == LOW);
-  if (camCenterPressed) camMappedX = 0;
-
-  // ---- choose ax/ay based on mode ----
-  const int SCALE = 162;
-
-  int steer = 0;
-  int outAx = 0;
-  int outAy = 0;
+  // ---- Choose outputs based on mode ----
+  bool autoMode = (g_mode == MODE_AUTO);
+  int steer = 0, outAx = 0, outAy = 0;
 
   if (g_mode == MODE_JOYSTICK) {
-    steer = xMapped;
-    outAx = xMapped;
-    outAy = yMapped;
+    outAx = driveJoy.x();
+    outAy = driveJoy.y();
+
+    // Pivot: strong steer + low throttle -> force throttle to 0
+    const int PIVOT_STEER = 4000;
+    const int PIVOT_THR   = 3200;
+    if (abs(outAx) > PIVOT_STEER && abs(outAy) < PIVOT_THR) {
+      outAy = 0;
+    }
+    steer = outAx;
+
+  } else if (g_mode == MODE_TILT) {
+    const float PITCH_MAX_DEG = 25.0f;
+    const float ROLL_MAX_DEG  = 25.0f;
+
+    int pitchCmd = (int)lroundf((pitchNow / PITCH_MAX_DEG) * (float)OUTPUT_MAX);
+    int rollCmd  = (int)lroundf((rollNow  / ROLL_MAX_DEG)  * (float)OUTPUT_MAX);
+
+    pitchCmd = clampInt(pitchCmd, -OUTPUT_MAX, OUTPUT_MAX);
+    rollCmd  = clampInt(rollCmd,  -OUTPUT_MAX, OUTPUT_MAX);
+    pitchCmd = applyDeadzone(pitchCmd, 1000);
+    rollCmd  = applyDeadzone(rollCmd,  1000);
+
+    outAx = rollCmd;
+    outAy = pitchCmd;
+    steer = rollCmd;
+
   } else {
-    const float YAW_MAX_DPS = 120.0f;
-    int yawMapped = (int)lroundf((yawDps / YAW_MAX_DPS) * 100.0f);
-    yawMapped = clampInt(yawMapped, -100, 100);
-    steer = yawMapped;
-    outAx = yawMapped;
-    outAy = yMapped;
+    // MODE_AUTO: nessun comando manuale
+    outAx = 0; outAy = 0; steer = 0;
   }
 
-  int outAz = camMappedX; // cam pan
-
-  // ---- UART ----
+  int outAz = camJoy.x();
   const char* dirTxt = dirTextFromSteer(steer);
-  Link.printf("D,%d,%d,%.1f,%.1f,%s\n",
-              (int)g_mode, (btnPressed ? 1 : 0), yawDps, headingDeg, dirTxt);
 
-  // ---- ESP-NOW 20 Hz ----
+  // UART verso CYD monitor
+  Link.printf("D,%d,%d,%.1f,%.1f,%s\n",
+              (int)g_mode, (btnPressed ? 1 : 0), pitchNow, rollNow, dirTxt);
+
+  // ---- Invio 20 Hz via ESP-NOW ----
   static uint32_t lastSendMs = 0;
   if (now - lastSendMs >= 50) {
     lastSendMs = now;
 
     ControlMsg msg;
-    msg.ax = (int16_t)(outAx * SCALE);
-    msg.ay = (int16_t)(outAy * SCALE);
-    msg.az = (int16_t)(outAz * SCALE);
+    msg.autoMode = autoMode;
+    msg.ax = (int16_t)clampInt(outAx, -OUTPUT_MAX, OUTPUT_MAX);
+    msg.ay = (int16_t)clampInt(outAy, -OUTPUT_MAX, OUTPUT_MAX);
+    msg.az = (int16_t)clampInt(outAz, -OUTPUT_MAX, OUTPUT_MAX);
 
     nowTx.send(RX_MAC, msg);
 
-    Serial.printf("[TX] mode=%d | xM=%d yM=%d camM=%d | ax=%d ay=%d az=%d\n",
-                  (int)g_mode, xMapped, yMapped, camMappedX,
-                  (int)msg.ax, (int)msg.ay, (int)msg.az);
+    Serial.printf("[TX] mode=%s auto=%d | x=%d y=%d z=%d | pitch=%.1f roll=%.1f dir=%s imu=%s\n",
+                  modeText(g_mode), (int)msg.autoMode,
+                  (int)msg.ax, (int)msg.ay, (int)msg.az,
+                  pitchNow, rollNow, dirTxt, imuOk ? "OK" : "FAIL");
   }
 
   delay(5);
