@@ -16,10 +16,11 @@ void setup() {
   Serial.print("RX STA MAC: ");
   Serial.println(WiFi.macAddress());
 
-  if (!nowRx.begin()) {
-    Serial.println("ESP-NOW init failed");
-    while (true) delay(1000);
-  }
+  //if (!nowRx.begin()) {
+    //Serial.println("ESP-NOW init failed");
+    //while (true) delay(1000);
+  //}
+  Serial.println("ESP-NOW init success");
 }
 
 void loop() {

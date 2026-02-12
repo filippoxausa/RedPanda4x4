@@ -2,6 +2,11 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <string.h>
+#include <Wire.h>
+
+// Display (I2C OLED tipo SSD1306)
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 #include <esp_arduino_version.h>
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
@@ -11,14 +16,21 @@
 // =======================================================
 //                QUICK FIX SWITCHES (CALIBRAZIONE)
 // =======================================================
-// Se in manuale avanti va indietro -> metti INVERT_THROTTLE_AXIS = true
-static const bool INVERT_THROTTLE_AXIS = true;   // <-- PROVA true/false
-// Se sterzo è invertito (dx/sx) -> metti INVERT_STEER_AXIS = true
-static const bool INVERT_STEER_AXIS    = false;  // <-- PROVA true/false
+static const bool INVERT_THROTTLE_AXIS = true;
+static const bool INVERT_STEER_AXIS    = false;
 
-// Se i motori fisicamente vanno al contrario -> inverti il lato
-static const bool INVERT_LEFT_MOTOR    = false;  // <-- PROVA true/false
-static const bool INVERT_RIGHT_MOTOR   = true;   // <-- PROVA true/false
+static const bool INVERT_LEFT_MOTOR    = false;
+static const bool INVERT_RIGHT_MOTOR   = true;
+
+// =======================================================
+//                    BUZZER
+// =======================================================
+static const int PIN_BUZZER = 5;          // collegare qui il buzzer
+static const int BUZZ_CH    = 7;          // canale LEDC libero
+static const int BUZZ_RES   = 10;
+static const int BUZZ_FREQ  = 2000;       // Hz (passivo). Con attivo fa comunque beep
+static const uint32_t BEEP_ON_MS  = 120;
+static const uint32_t BEEP_OFF_MS = 120;
 
 // =======================================================
 //                    CONTROL MSG (packed)
@@ -215,8 +227,6 @@ static inline int applyDeadzone(int v, int dz) {
 // =======================================================
 static const int AX_AY_MAX = 16200;
 static const int DEADZONE  = 300;
-
-// ✅ FIX 3: snap to zero del throttle in PWM (robusto contro drift)
 static const int THR_SNAP_PWM = 35;
 
 static MotorCmd accelToMotorsManual(ControlMsg a) {
@@ -232,12 +242,10 @@ static MotorCmd accelToMotorsManual(ControlMsg a) {
   int steerPWM = mapInt(steer, -AX_AY_MAX, AX_AY_MAX, -255, 255);
   int thrPWM   = mapInt(thr,   -AX_AY_MAX, AX_AY_MAX, -255, 255);
 
-  // ✅ snap-to-zero
   if (abs(thrPWM) < THR_SNAP_PWM) thrPWM = 0;
 
   int left = 0, right = 0;
 
-  // ✅ wantSpin più robusto: deve essere davvero fermo per pivotare
   const bool wantSpin = (thrPWM == 0) && (abs(steerPWM) > 60);
 
   if (wantSpin) {
@@ -350,131 +358,286 @@ static inline uint16_t clampDist(uint16_t d) {
 }
 
 // =======================================================
-//          AUTO: sweep continuo + decisione L/C/R
+//  DISPLAY (SSD1306 I2C)
 // =======================================================
-static const uint16_t AUTO_OBS_CM   = 22;
-static const uint16_t AUTO_GOOD_CM  = 35;
+static const int SCREEN_W = 128;
+static const int SCREEN_H = 64;
+static const int OLED_ADDR = 0x3C;     // spesso 0x3C (a volte 0x3D)
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
+
+static void drawHappy() {
+  display.clearDisplay();
+  // occhi
+  display.fillCircle(44, 24, 5, SSD1306_WHITE);
+  display.fillCircle(84, 24, 5, SSD1306_WHITE);
+  // sorriso
+  display.drawCircle(64, 44, 20, SSD1306_WHITE);
+  // “taglia” parte alta per farlo diventare sorriso
+  display.fillRect(44, 24, 40, 20, SSD1306_BLACK);
+  display.display();
+}
+
+static void drawSad() {
+  display.clearDisplay();
+  // occhi
+  display.fillCircle(44, 24, 5, SSD1306_WHITE);
+  display.fillCircle(84, 24, 5, SSD1306_WHITE);
+  // bocca triste (arco rovesciato)
+  display.drawCircle(64, 60, 20, SSD1306_WHITE);
+  display.fillRect(44, 60, 40, 20, SSD1306_BLACK);
+  display.display();
+}
+
+static void drawProjectName() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 22);
+  display.print("RedPanda");
+  display.setCursor(0, 44);
+  display.print("4x4");
+  display.display();
+}
+
+// =======================================================
+//  BUZZER: beep mentre in retromarcia
+// =======================================================
+static bool buzOn = false;
+static uint32_t buzT0 = 0;
+
+static void buzzerInit() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttachChannel(PIN_BUZZER, BUZZ_FREQ, BUZZ_RES, BUZZ_CH);
+  // per far suonare: ledcWriteTone(BUZZ_CH, freq)
+#else
+  ledcSetup(BUZZ_CH, 2000, BUZZ_RES);
+  ledcAttachPin(PIN_BUZZER, BUZZ_CH);
+#endif
+  buzOn = false;
+  buzT0 = millis();
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWriteTone(BUZZ_CH, 0);
+#else
+  ledcWrite(BUZZ_CH, 0);
+#endif
+}
+
+static void buzzerSet(bool on) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  if (on) ledcWriteTone(BUZZ_CH, BUZZ_FREQ);
+  else    ledcWriteTone(BUZZ_CH, 0);
+#else
+  // fallback: PWM fisso (non proprio "tono" come ESP32 core3)
+  ledcWrite(BUZZ_CH, on ? (1 << (BUZZ_RES - 1)) : 0);
+#endif
+}
+
+static void buzzerUpdate(bool wantBeep) {
+  uint32_t now = millis();
+  if (!wantBeep) {
+    if (buzOn) { buzOn = false; buzzerSet(false); }
+    buzT0 = now;
+    return;
+  }
+
+  if (!buzOn) {
+    if (now - buzT0 >= BEEP_OFF_MS) {
+      buzOn = true;
+      buzT0 = now;
+      buzzerSet(true);
+    }
+  } else {
+    if (now - buzT0 >= BEEP_ON_MS) {
+      buzOn = false;
+      buzT0 = now;
+      buzzerSet(false);
+    }
+  }
+}
+
+// =======================================================
+//  AUTO: stop quando misura ultrasuoni; faccina triste se ostacolo
+// =======================================================
+static const uint16_t AUTO_FRONT_TRIG_CM  = 10;
+static const uint16_t AUTO_SIDE_FREE_CM   = 22;
+static const uint16_t AUTO_SIDE_BETTER_BY = 3;
 
 static const int16_t  AUTO_FWD_SPEED  = 160;
 static const int16_t  AUTO_BACK_SPEED = 150;
-static const int16_t  AUTO_TURN_SPEED = 180;
 
-static const uint32_t AUTO_BACK_MS = 260;
-static const uint32_t AUTO_TURN_MS = 380;
-static const uint32_t AUTO_STOP_MS = 120;
+static const int16_t  AUTO_TURN_SPEED = 210;   // sterzata più forte
+static const uint32_t AUTO_TURN_MS    = 750;   // più lunga
 
-enum AutoState : uint8_t { A_FWD=0, A_STOP, A_BACK, A_TURN };
-static AutoState autoSt = A_FWD;
-static uint32_t autoTs = 0;
-static int8_t autoTurnDir = +1;
+static const uint32_t AUTO_STOP_MS    = 90;
 
-// sweep continuo servo US
+// sweep “giro vecchio”
 static int usAngle = 90;
-static int usDir = +1;
-static const uint32_t US_SWEEP_MS = 55;
+static int usDir   = +1;
+static const uint32_t US_SWEEP_MS   = 55;
+static const int      US_SWEEP_STEP = 2;
 
-// misure “latched” per L/C/R
-static uint16_t dL=999, dC=999, dR=999;
+static const uint32_t DIST_SAMPLE_MS = 65;
 static uint32_t lastDistMs = 0;
-static const uint32_t DIST_SAMPLE_MS = 70;
 
-static inline void updateBucketsFromAngle(int ang, uint16_t cm) {
+static const uint32_t AUTO_SCAN_MIN_MS = 700;
+static const uint32_t AUTO_SCAN_MAX_MS = 2600;
+
+static const uint32_t AUTO_BACK_MS = 320;
+
+static uint16_t dL = 999, dR = 999;
+static bool gotL = false, gotR = false;
+
+enum AutoState : uint8_t { A_FWD=0, A_STOP, A_SCAN, A_BACK, A_TURN };
+static AutoState autoSt = A_FWD;
+static uint32_t  autoTs = 0;
+static int8_t    autoTurnDir = +1; // +1=destra, -1=sinistra
+
+// stato “per display”
+static bool g_autoObstacle = false;   // TRUE se “vede ostacolo” (davanti < 10 o sta scan/back)
+static bool g_isReverseNow = false;   // per buzzer
+
+static inline void updateLRBucketsFromAngle(int ang, uint16_t cm) {
   cm = clampDist(cm);
-  if (abs(ang - 90) <= 8) dC = cm;
-  else if (ang <= (SERVO_US_MIN_ANG + 12)) dR = cm;
-  else if (ang >= (SERVO_US_MAX_ANG - 12)) dL = cm;
-}
-
-static int8_t decideTurnDir() {
-  uint16_t L = clampDist(dL), C = clampDist(dC), R = clampDist(dR);
-  if (C >= AUTO_GOOD_CM) return 0;
-  if (L > R + 3) return -1;
-  if (R > L + 3) return +1;
-  autoTurnDir = -autoTurnDir;
-  return autoTurnDir;
+  if (ang <= (SERVO_US_MIN_ANG + 10)) { dR = cm; gotR = true; }
+  else if (ang >= (SERVO_US_MAX_ANG - 10)) { dL = cm; gotL = true; }
 }
 
 static void autoReset() {
   autoSt = A_FWD;
   autoTs = millis();
   autoTurnDir = +1;
-  dL = dC = dR = 999;
+
+  usAngle = 90;
+  servoUS_Write(90);
+
+  dL = dR = 999;
+  gotL = gotR = false;
+  lastDistMs = millis();
+
+  g_autoObstacle = false;
+  g_isReverseNow = false;
 }
 
 static void runAuto(bool backObs) {
   const uint32_t now = millis();
-
-  static uint32_t tSweep = 0;
-  if (now - tSweep >= US_SWEEP_MS) {
-    tSweep = now;
-    usAngle += usDir * 2;
-    if (usAngle >= SERVO_US_MAX_ANG) { usAngle = SERVO_US_MAX_ANG; usDir = -1; }
-    if (usAngle <= SERVO_US_MIN_ANG) { usAngle = SERVO_US_MIN_ANG; usDir = +1; }
-    servoUS_Write(usAngle);
-  }
-
-  if (now - lastDistMs >= DIST_SAMPLE_MS) {
-    lastDistMs = now;
-    uint16_t cm = hcsr04ReadCm();
-    updateBucketsFromAngle(usAngle, cm);
-  }
-
-  const bool frontObs = (clampDist(dC) < AUTO_OBS_CM);
+  g_isReverseNow = false;
 
   switch (autoSt) {
     case A_FWD: {
+      servoUS_Write(90);
       motorsSetSmooth(AUTO_FWD_SPEED, AUTO_FWD_SPEED);
-      if (frontObs) {
+
+      uint16_t front = clampDist(hcsr04ReadCm());
+      g_autoObstacle = (front <= AUTO_FRONT_TRIG_CM);
+
+      if (front <= AUTO_FRONT_TRIG_CM) {
+        motorsStop();
         autoSt = A_STOP;
         autoTs = now;
-        motorsStop();
       }
     } break;
 
     case A_STOP: {
       motorsStop();
+      servoUS_Write(90);
+      g_autoObstacle = true;
+
       if (now - autoTs >= AUTO_STOP_MS) {
-        int8_t dir = decideTurnDir();
-        if (dir == 0) {
-          autoSt = A_FWD;
+        dL = dR = 999;
+        gotL = gotR = false;
+
+        usAngle = 90;
+        servoUS_Write(usAngle);
+
+        lastDistMs = now;
+        autoSt = A_SCAN;
+        autoTs = now;
+      }
+    } break;
+
+    case A_SCAN: {
+      // FERMO quando misura
+      motorsStop();
+      g_autoObstacle = true;
+
+      // sweep servo (giro vecchio)
+      static uint32_t tSweep = 0;
+      if (now - tSweep >= US_SWEEP_MS) {
+        tSweep = now;
+        usAngle += usDir * US_SWEEP_STEP;
+        if (usAngle >= SERVO_US_MAX_ANG) { usAngle = SERVO_US_MAX_ANG; usDir = -1; }
+        if (usAngle <= SERVO_US_MIN_ANG) { usAngle = SERVO_US_MIN_ANG; usDir = +1; }
+        servoUS_Write(usAngle);
+      }
+
+      if (now - lastDistMs >= DIST_SAMPLE_MS) {
+        lastDistMs = now;
+        uint16_t cm = hcsr04ReadCm();
+        updateLRBucketsFromAngle(usAngle, cm);
+      }
+
+      const uint32_t elapsed = now - autoTs;
+      const bool minOk = (elapsed >= AUTO_SCAN_MIN_MS);
+      const bool haveBoth = (gotL && gotR);
+      const bool timeout  = (elapsed >= AUTO_SCAN_MAX_MS);
+
+      if (minOk && (haveBoth || timeout)) {
+        uint16_t L = clampDist(dL);
+        uint16_t R = clampDist(dR);
+
+        bool leftFree  = (L >= AUTO_SIDE_FREE_CM);
+        bool rightFree = (R >= AUTO_SIDE_FREE_CM);
+
+        if (!leftFree && !rightFree) {
+          autoSt = A_BACK;
           autoTs = now;
-        } else {
-          uint16_t best = max(clampDist(dC), max(clampDist(dL), clampDist(dR)));
-          if (best < (AUTO_OBS_CM + 6) && !backObs) {
-            autoSt = A_BACK;
-            autoTs = now;
-          } else {
-            autoTurnDir = dir;
-            autoSt = A_TURN;
-            autoTs = now;
-          }
+          break;
         }
+
+        int8_t dir = 0;
+        if (leftFree && !rightFree) dir = -1;
+        else if (!leftFree && rightFree) dir = +1;
+        else {
+          if (L > R + AUTO_SIDE_BETTER_BY) dir = -1;
+          else if (R > L + AUTO_SIDE_BETTER_BY) dir = +1;
+          else { autoTurnDir = -autoTurnDir; dir = autoTurnDir; }
+        }
+
+        autoTurnDir = dir;
+        autoSt = A_TURN;
+        autoTs = now;
       }
     } break;
 
     case A_BACK: {
+      g_autoObstacle = true;
+      g_isReverseNow = true;
+
       if (backObs) {
         motorsStop();
+        autoTurnDir = -autoTurnDir;
         autoSt = A_TURN;
         autoTs = now;
-        autoTurnDir = -autoTurnDir;
         break;
       }
 
       motorsSetSmooth(-AUTO_BACK_SPEED, -AUTO_BACK_SPEED);
+
       if (now - autoTs >= AUTO_BACK_MS) {
         motorsStop();
-        autoSt = A_TURN;
+        autoSt = A_STOP;
         autoTs = now;
-        int8_t dir = decideTurnDir();
-        if (dir != 0) autoTurnDir = dir;
       }
     } break;
 
     case A_TURN: {
-      int16_t L = (autoTurnDir > 0) ? +AUTO_TURN_SPEED : -AUTO_TURN_SPEED;
-      int16_t R = (autoTurnDir > 0) ? -AUTO_TURN_SPEED : +AUTO_TURN_SPEED;
-      motorsSetSmooth(L, R);
+      g_autoObstacle = true;
+      servoUS_Write(90);
+
+      int16_t Lm = (autoTurnDir > 0) ? +AUTO_TURN_SPEED : -AUTO_TURN_SPEED;
+      int16_t Rm = (autoTurnDir > 0) ? -AUTO_TURN_SPEED : +AUTO_TURN_SPEED;
+      motorsSetSmooth(Lm, Rm);
+
       if (now - autoTs >= AUTO_TURN_MS) {
         motorsStop();
         autoSt = A_FWD;
@@ -524,6 +687,9 @@ static void selfTest() {
 static EspNowReceiver rx;
 static const uint32_t RX_TIMEOUT_MS = 250;
 
+// display update throttling
+static uint32_t lastDispMs = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -532,6 +698,18 @@ void setup() {
   servosInit();
   hcsr04Init();
   irInit();
+  buzzerInit();
+
+  // I2C for display
+  Wire.begin(21, 22);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("[OLED] init FAILED (addr 0x3C?). Prova 0x3D se non va.");
+  } else {
+    display.clearDisplay();
+    display.display();
+    drawProjectName();
+  }
 
   Serial.print("RX STA MAC: ");
   Serial.println(WiFi.macAddress());
@@ -560,13 +738,32 @@ void loop() {
     motorsStop();
     servoUS_Write(90);
     servoCam_Write(camCur);
+    buzzerUpdate(false);
+
+    // display: progetto
+    if (now - lastDispMs > 120) {
+      lastDispMs = now;
+      drawProjectName();
+    }
+
     delay(5);
     return;
   }
 
+  bool wantReverseBeep = false;
+
   if (msg.autoMode) {
     runAuto(backObs);
     camTgt = 90;
+    wantReverseBeep = g_isReverseNow;
+
+    // display in AUTO: smile / sad
+    if (now - lastDispMs > 120) {
+      lastDispMs = now;
+      if (g_autoObstacle) drawSad();
+      else drawHappy();
+    }
+
   } else {
     autoReset();
 
@@ -575,10 +772,12 @@ void loop() {
     // blocco retro se IR vede ostacolo
     const int ayEff = INVERT_THROTTLE_AXIS ? -msg.ay : msg.ay;
     const bool wantReverse = (ayEff < -DEADZONE);
+    wantReverseBeep = wantReverse;  // beep se stai chiedendo retromarcia
 
     if (wantReverse && backObs) {
       if (m.left < 0)  m.left = 0;
       if (m.right < 0) m.right = 0;
+      wantReverseBeep = false; // non sta andando davvero indietro
     }
 
     motorsSetSmooth(m.left, m.right);
@@ -590,7 +789,16 @@ void loop() {
     int az = clampInt((int)msg.az, -AX_AY_MAX, AX_AY_MAX);
     camTgt = mapInt(az, -AX_AY_MAX, AX_AY_MAX, 0, 180);
     camTgt = clampInt(camTgt, SERVO_CAM_MIN_ANG, SERVO_CAM_MAX_ANG);
+
+    // display: nome progetto
+    if (now - lastDispMs > 250) {
+      lastDispMs = now;
+      drawProjectName();
+    }
   }
+
+  // buzzer retromarcia
+  buzzerUpdate(wantReverseBeep);
 
   // camera smoothing
   if (now - lastCamMs >= CAM_STEP_MS) {
@@ -598,24 +806,6 @@ void loop() {
     if (camCur < camTgt) camCur += CAM_STEP_DEG;
     else if (camCur > camTgt) camCur -= CAM_STEP_DEG;
     servoCam_Write(camCur);
-  }
-
-  // debug
-  static uint32_t tPrint = 0;
-  if (now - tPrint >= 200) {
-    tPrint = now;
-    Serial.print("auto="); Serial.print((int)msg.autoMode);
-    Serial.print(" ageMs="); Serial.print(ageMs);
-    Serial.print(" ax="); Serial.print(msg.ax);
-    Serial.print(" ay="); Serial.print(msg.ay);
-    Serial.print(" L="); Serial.print(g_curL);
-    Serial.print(" R="); Serial.print(g_curR);
-    Serial.print(" IR_back="); Serial.print(backObs ? 1 : 0);
-    Serial.print(" dL="); Serial.print(dL);
-    Serial.print(" dC="); Serial.print(dC);
-    Serial.print(" dR="); Serial.print(dR);
-    Serial.print(" usAng="); Serial.print(usAngle);
-    Serial.print(" st="); Serial.println((int)autoSt);
   }
 
   delay(5);

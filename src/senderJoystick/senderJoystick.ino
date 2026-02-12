@@ -201,14 +201,18 @@ static int clampInt(int v, int lo, int hi) {
   return v;
 }
 
-static int deadzone100(int v, int dz) {
+static const int OUTPUT_MAX = 16000;
+
+// Deadzone con rescaling: l'output raggiunge comunque ±OUTPUT_MAX
+static int applyDeadzone(int v, int dz) {
   if (abs(v) <= dz) return 0;
-  return (v > 0) ? (v - dz) : (v + dz);
+  int sign = (v > 0) ? 1 : -1;
+  return sign * (int)((long)(abs(v) - dz) * OUTPUT_MAX / (OUTPUT_MAX - dz));
 }
 
 static const char* dirTextFromSteer(int steer) {
-  if (steer > 15)  return "RIGHT";
-  if (steer < -15) return "LEFT";
+  if (steer > 2400)  return "RIGHT";
+  if (steer < -2400) return "LEFT";
   return "STRAIGHT";
 }
 
@@ -320,8 +324,9 @@ void loop() {
 
   // ---- joystick 2 (PAN) ----
   int camRawX = analogRead(PIN2_VRX);
-  int camMappedX = map(camRawX, 0, 4095, -100, 100);
-  camMappedX = deadzone100(camMappedX, 8);
+  int camMappedX = map(camRawX, 0, 4095, -OUTPUT_MAX, OUTPUT_MAX);
+  camMappedX = applyDeadzone(camMappedX, 1300);
+  camMappedX = clampInt(camMappedX, -OUTPUT_MAX, OUTPUT_MAX);
 
   bool camCenterPressed = (digitalRead(PIN2_SW) == LOW);
   if (camCenterPressed) camMappedX = 0;
@@ -359,15 +364,28 @@ void loop() {
   int xRel = xRaw - xCenter;
   int yRel = yRaw - yCenter;
 
-  int xMapped = map(xRel, -2048, 2047, -100, 100);
-  int yMapped = map(yRel, -2048, 2047, -100, 100);
+  // Mappatura asimmetrica: gestisce correttamente centri non a 2048
+  int xMapped, yMapped;
+  if (xRel >= 0) {
+    int maxR = 4095 - xCenter;
+    xMapped = (maxR > 0) ? (int)((long)xRel * OUTPUT_MAX / maxR) : 0;
+  } else {
+    xMapped = (xCenter > 0) ? (int)((long)xRel * OUTPUT_MAX / xCenter) : 0;
+  }
+  if (yRel >= 0) {
+    int maxR = 4095 - yCenter;
+    yMapped = (maxR > 0) ? (int)((long)yRel * OUTPUT_MAX / maxR) : 0;
+  } else {
+    yMapped = (yCenter > 0) ? (int)((long)yRel * OUTPUT_MAX / yCenter) : 0;
+  }
 
-  // deadzone drive
-  xMapped = deadzone100(xMapped, 8);
-  yMapped = deadzone100(yMapped, 8);
+  // Deadzone con rescaling + clamp
+  xMapped = applyDeadzone(xMapped, 1300);
+  yMapped = applyDeadzone(yMapped, 1300);
+  xMapped = clampInt(xMapped, -OUTPUT_MAX, OUTPUT_MAX);
+  yMapped = clampInt(yMapped, -OUTPUT_MAX, OUTPUT_MAX);
 
   // ---- choose outputs based on mode ----
-  const int SCALE = 162;
   bool autoMode = (g_mode == MODE_AUTO);
 
   int steer = 0;
@@ -378,9 +396,9 @@ void loop() {
     outAx = xMapped;
     outAy = yMapped;
 
-    // ✅ FIX 1: clamp throttle a 0 quando vuoi pivot
-    const int PIVOT_STEER = 25;
-    const int PIVOT_THR   = 20;
+    // Pivot: sterzo forte + throttle basso → forza throttle a 0
+    const int PIVOT_STEER = 4000;
+    const int PIVOT_THR   = 3200;
     if (abs(outAx) > PIVOT_STEER && abs(outAy) < PIVOT_THR) {
       outAy = 0;
     }
@@ -390,14 +408,14 @@ void loop() {
     const float PITCH_MAX_DEG = 25.0f;
     const float ROLL_MAX_DEG  = 25.0f;
 
-    int pitchCmd = (int)lroundf((pitchNow / PITCH_MAX_DEG) * 100.0f);
-    int rollCmd  = (int)lroundf((rollNow  / ROLL_MAX_DEG)  * 100.0f);
+    int pitchCmd = (int)lroundf((pitchNow / PITCH_MAX_DEG) * (float)OUTPUT_MAX);
+    int rollCmd  = (int)lroundf((rollNow  / ROLL_MAX_DEG)  * (float)OUTPUT_MAX);
 
-    pitchCmd = clampInt(pitchCmd, -100, 100);
-    rollCmd  = clampInt(rollCmd,  -100, 100);
+    pitchCmd = clampInt(pitchCmd, -OUTPUT_MAX, OUTPUT_MAX);
+    rollCmd  = clampInt(rollCmd,  -OUTPUT_MAX, OUTPUT_MAX);
 
-    pitchCmd = deadzone100(pitchCmd, 6);
-    rollCmd  = deadzone100(rollCmd,  6);
+    pitchCmd = applyDeadzone(pitchCmd, 1000);
+    rollCmd  = applyDeadzone(rollCmd,  1000);
 
     outAx = rollCmd;
     outAy = pitchCmd;
@@ -421,17 +439,16 @@ void loop() {
 
     ControlMsg msg;
     msg.autoMode = autoMode;
-    msg.ax = (int16_t)(outAx * SCALE);
-    msg.ay = (int16_t)(outAy * SCALE);
-    msg.az = (int16_t)(outAz * SCALE);
+    msg.ax = (int16_t)clampInt(outAx, -OUTPUT_MAX, OUTPUT_MAX);
+    msg.ay = (int16_t)clampInt(outAy, -OUTPUT_MAX, OUTPUT_MAX);
+    msg.az = (int16_t)clampInt(outAz, -OUTPUT_MAX, OUTPUT_MAX);
 
     esp_now_send(RX_MAC, (uint8_t*)&msg, sizeof(msg));
 
-    Serial.printf("[TX] mode=%d auto=%d | ax=%d ay=%d az=%d | pitch=%.1f roll=%.1f dir=%s imu=%s | joyCenter=(%d,%d)\n",
-                  (int)g_mode, (int)msg.autoMode,
+    Serial.printf("[TX] mode=%s auto=%d | x=%d y=%d z=%d | pitch=%.1f roll=%.1f dir=%s imu=%s\n",
+                  modeText(g_mode), (int)msg.autoMode,
                   (int)msg.ax, (int)msg.ay, (int)msg.az,
-                  pitchNow, rollNow, dirTxt, imuOk ? "OK" : "FAIL",
-                  xCenter, yCenter);
+                  pitchNow, rollNow, dirTxt, imuOk ? "OK" : "FAIL");
   }
 
   delay(5);

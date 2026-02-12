@@ -27,6 +27,7 @@ bool EspNowReceiver::begin() {
 
   if (esp_now_init() != ESP_OK) return false;
   esp_now_register_recv_cb(EspNowReceiver::onRecv);
+  
 
   s_lastRxMs = millis();
   return true;
