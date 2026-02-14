@@ -292,8 +292,9 @@ static const int CH_SERVO_CAM = 3;
 static const int SERVO_MIN_US = 650;
 static const int SERVO_MAX_US = 2350;
 
-static int SERVO_US_MIN_ANG = 55;
-static int SERVO_US_MAX_ANG = 140;
+static int SERVO_US_CENTER  = 40;  // angolo "dritto avanti" (era 90)
+static int SERVO_US_MIN_ANG = 0;   // era 55  (+15)
+static int SERVO_US_MAX_ANG = 80;  // era 140 (+15)
 
 static int SERVO_CAM_MIN_ANG = 35;
 static int SERVO_CAM_MAX_ANG = 145;
@@ -329,7 +330,7 @@ static void servosInit() {
   ledcSetup(CH_SERVO_US, SERVO_FREQ, SERVO_RES);  ledcAttachPin(PIN_SERVO_US, CH_SERVO_US);
   ledcSetup(CH_SERVO_CAM, SERVO_FREQ, SERVO_RES); ledcAttachPin(PIN_SERVO_CAM, CH_SERVO_CAM);
 #endif
-  servoUS_Write(90);
+  servoUS_Write(SERVO_US_CENTER);
   servoCam_Write(90);
 }
 
@@ -416,7 +417,7 @@ static void buzzerInit() {
   buzOn = false;
   buzT0 = millis();
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-  ledcWriteTone(BUZZ_CH, 0);
+  ledcWriteTone(PIN_BUZZER, 0);   // Core3: vuole il PIN, non il canale!
 #else
   ledcWrite(BUZZ_CH, 0);
 #endif
@@ -424,8 +425,8 @@ static void buzzerInit() {
 
 static void buzzerSet(bool on) {
 #if ESP_ARDUINO_VERSION_MAJOR >= 3
-  if (on) ledcWriteTone(BUZZ_CH, BUZZ_FREQ);
-  else    ledcWriteTone(BUZZ_CH, 0);
+  if (on) ledcWriteTone(PIN_BUZZER, BUZZ_FREQ);   // Core3: vuole il PIN
+  else    ledcWriteTone(PIN_BUZZER, 0);
 #else
   // fallback: PWM fisso (non proprio "tono" come ESP32 core3)
   ledcWrite(BUZZ_CH, on ? (1 << (BUZZ_RES - 1)) : 0);
@@ -456,64 +457,43 @@ static void buzzerUpdate(bool wantBeep) {
 }
 
 // =======================================================
-//  AUTO: stop quando misura ultrasuoni; faccina triste se ostacolo
+//  AUTO: evita ostacoli con scansione ultrasuoni
 // =======================================================
-static const uint16_t AUTO_FRONT_TRIG_CM  = 10;
-static const uint16_t AUTO_SIDE_FREE_CM   = 22;
-static const uint16_t AUTO_SIDE_BETTER_BY = 3;
+static const uint16_t AUTO_FRONT_TRIG_CM = 15;    // soglia ostacolo frontale (cm)
+static const uint16_t AUTO_SIDE_FREE_CM  = 25;    // lato considerato "libero" (cm)
 
 static const int16_t  AUTO_FWD_SPEED  = 160;
 static const int16_t  AUTO_BACK_SPEED = 150;
 
-static const int16_t  AUTO_TURN_SPEED = 210;   // sterzata più forte
-static const uint32_t AUTO_TURN_MS    = 750;   // più lunga
+// Curva ad arco: ruota esterna veloce, interna lenta (stessa direzione = arco, non giro sul posto)
+static const int16_t  AUTO_TURN_OUTER = 200;      // ruota esterna
+static const int16_t  AUTO_TURN_INNER = 60;       // ruota interna (lenta, stessa direzione)
+static const uint32_t AUTO_TURN_MS    = 1100;     // durata curva
 
-static const uint32_t AUTO_STOP_MS    = 90;
+static const uint32_t AUTO_STOP_MS   = 100;       // breve pausa prima dello scan
+static const uint32_t AUTO_BACK_MS   = 1000;      // retromarcia ~1 secondo
 
-// sweep “giro vecchio”
-static int usAngle = 90;
-static int usDir   = +1;
-static const uint32_t US_SWEEP_MS   = 55;
-static const int      US_SWEEP_STEP = 2;
-
-static const uint32_t DIST_SAMPLE_MS = 65;
-static uint32_t lastDistMs = 0;
-
-static const uint32_t AUTO_SCAN_MIN_MS = 700;
-static const uint32_t AUTO_SCAN_MAX_MS = 2600;
-
-static const uint32_t AUTO_BACK_MS = 320;
+static const uint32_t SCAN_SERVO_SETTLE_MS = 450; // tempo per il servo di raggiungere la posizione
 
 static uint16_t dL = 999, dR = 999;
-static bool gotL = false, gotR = false;
+static uint8_t  scanPhase = 0;        // sotto-fase dello scan (0..3)
 
 enum AutoState : uint8_t { A_FWD=0, A_STOP, A_SCAN, A_BACK, A_TURN };
 static AutoState autoSt = A_FWD;
 static uint32_t  autoTs = 0;
-static int8_t    autoTurnDir = +1; // +1=destra, -1=sinistra
+static int8_t    autoTurnDir = +1;    // +1=destra, -1=sinistra
 
-// stato “per display”
-static bool g_autoObstacle = false;   // TRUE se “vede ostacolo” (davanti < 10 o sta scan/back)
-static bool g_isReverseNow = false;   // per buzzer
-
-static inline void updateLRBucketsFromAngle(int ang, uint16_t cm) {
-  cm = clampDist(cm);
-  if (ang <= (SERVO_US_MIN_ANG + 10)) { dR = cm; gotR = true; }
-  else if (ang >= (SERVO_US_MAX_ANG - 10)) { dL = cm; gotL = true; }
-}
+// stato "per display"
+static bool g_autoObstacle = false;   // TRUE se "vede ostacolo"
+static bool g_isReverseNow = false;   // per buzzer retromarcia
 
 static void autoReset() {
   autoSt = A_FWD;
   autoTs = millis();
   autoTurnDir = +1;
-
-  usAngle = 90;
-  servoUS_Write(90);
-
+  scanPhase = 0;
+  servoUS_Write(SERVO_US_CENTER);
   dL = dR = 999;
-  gotL = gotR = false;
-  lastDistMs = millis();
-
   g_autoObstacle = false;
   g_isReverseNow = false;
 }
@@ -523,8 +503,10 @@ static void runAuto(bool backObs) {
   g_isReverseNow = false;
 
   switch (autoSt) {
+
+    // ---- avanti dritto, controlla davanti ----
     case A_FWD: {
-      servoUS_Write(90);
+      servoUS_Write(SERVO_US_CENTER);
       motorsSetSmooth(AUTO_FWD_SPEED, AUTO_FWD_SPEED);
 
       uint16_t front = clampDist(hcsr04ReadCm());
@@ -537,83 +519,84 @@ static void runAuto(bool backObs) {
       }
     } break;
 
+    // ---- breve pausa, poi scansione ----
     case A_STOP: {
       motorsStop();
-      servoUS_Write(90);
+      servoUS_Write(SERVO_US_CENTER);
       g_autoObstacle = true;
 
       if (now - autoTs >= AUTO_STOP_MS) {
+        scanPhase = 0;
         dL = dR = 999;
-        gotL = gotR = false;
-
-        usAngle = 90;
-        servoUS_Write(usAngle);
-
-        lastDistMs = now;
         autoSt = A_SCAN;
         autoTs = now;
       }
     } break;
 
+    // ---- guarda a sinistra, poi a destra, poi decidi ----
     case A_SCAN: {
-      // FERMO quando misura
       motorsStop();
       g_autoObstacle = true;
 
-      // sweep servo (giro vecchio)
-      static uint32_t tSweep = 0;
-      if (now - tSweep >= US_SWEEP_MS) {
-        tSweep = now;
-        usAngle += usDir * US_SWEEP_STEP;
-        if (usAngle >= SERVO_US_MAX_ANG) { usAngle = SERVO_US_MAX_ANG; usDir = -1; }
-        if (usAngle <= SERVO_US_MIN_ANG) { usAngle = SERVO_US_MIN_ANG; usDir = +1; }
-        servoUS_Write(usAngle);
-      }
-
-      if (now - lastDistMs >= DIST_SAMPLE_MS) {
-        lastDistMs = now;
-        uint16_t cm = hcsr04ReadCm();
-        updateLRBucketsFromAngle(usAngle, cm);
-      }
-
-      const uint32_t elapsed = now - autoTs;
-      const bool minOk = (elapsed >= AUTO_SCAN_MIN_MS);
-      const bool haveBoth = (gotL && gotR);
-      const bool timeout  = (elapsed >= AUTO_SCAN_MAX_MS);
-
-      if (minOk && (haveBoth || timeout)) {
-        uint16_t L = clampDist(dL);
-        uint16_t R = clampDist(dR);
-
-        bool leftFree  = (L >= AUTO_SIDE_FREE_CM);
-        bool rightFree = (R >= AUTO_SIDE_FREE_CM);
-
-        if (!leftFree && !rightFree) {
-          autoSt = A_BACK;
+      switch (scanPhase) {
+        case 0:
+          // muovi servo a sinistra (angolo max)
+          servoUS_Write(SERVO_US_MAX_ANG);
+          scanPhase = 1;
           autoTs = now;
           break;
-        }
 
-        int8_t dir = 0;
-        if (leftFree && !rightFree) dir = -1;
-        else if (!leftFree && rightFree) dir = +1;
-        else {
-          if (L > R + AUTO_SIDE_BETTER_BY) dir = -1;
-          else if (R > L + AUTO_SIDE_BETTER_BY) dir = +1;
-          else { autoTurnDir = -autoTurnDir; dir = autoTurnDir; }
-        }
+        case 1:
+          // aspetta che il servo arrivi, poi leggi distanza sinistra
+          if (now - autoTs >= SCAN_SERVO_SETTLE_MS) {
+            dL = clampDist(hcsr04ReadCm());
+            // ora muovi servo a destra (angolo min)
+            servoUS_Write(SERVO_US_MIN_ANG);
+            scanPhase = 2;
+            autoTs = now;
+          }
+          break;
 
-        autoTurnDir = dir;
-        autoSt = A_TURN;
-        autoTs = now;
+        case 2:
+          // aspetta che il servo arrivi, poi leggi distanza destra
+          if (now - autoTs >= SCAN_SERVO_SETTLE_MS) {
+            dR = clampDist(hcsr04ReadCm());
+            // ricentra il servo
+            servoUS_Write(SERVO_US_CENTER);
+            scanPhase = 3;
+            autoTs = now;
+          }
+          break;
+
+        case 3: {
+          // decidi direzione
+          bool leftFree  = (dL >= AUTO_SIDE_FREE_CM);
+          bool rightFree = (dR >= AUTO_SIDE_FREE_CM);
+
+          if (!leftFree && !rightFree) {
+            // entrambi bloccati -> retromarcia, poi ri-scan
+            autoSt = A_BACK;
+            autoTs = now;
+          } else {
+            // scegli il lato piu libero
+            if (leftFree && !rightFree)       autoTurnDir = -1;  // curva a sinistra
+            else if (!leftFree && rightFree)  autoTurnDir = +1;  // curva a destra
+            else autoTurnDir = (dL >= dR) ? -1 : +1;            // prendi il piu ampio
+
+            autoSt = A_TURN;
+            autoTs = now;
+          }
+        } break;
       }
     } break;
 
+    // ---- retromarcia ~1 s, poi ri-scan ----
     case A_BACK: {
       g_autoObstacle = true;
       g_isReverseNow = true;
 
       if (backObs) {
+        // sensore IR dietro vede ostacolo -> ferma e prova a girare comunque
         motorsStop();
         autoTurnDir = -autoTurnDir;
         autoSt = A_TURN;
@@ -625,17 +608,27 @@ static void runAuto(bool backObs) {
 
       if (now - autoTs >= AUTO_BACK_MS) {
         motorsStop();
-        autoSt = A_STOP;
+        autoSt = A_STOP;   // torna a STOP -> ri-scan
         autoTs = now;
       }
     } break;
 
+    // ---- curva ad arco (non giro sul posto) ----
     case A_TURN: {
       g_autoObstacle = true;
-      servoUS_Write(90);
+      servoUS_Write(SERVO_US_CENTER);
 
-      int16_t Lm = (autoTurnDir > 0) ? +AUTO_TURN_SPEED : -AUTO_TURN_SPEED;
-      int16_t Rm = (autoTurnDir > 0) ? -AUTO_TURN_SPEED : +AUTO_TURN_SPEED;
+      // Entrambe le ruote avanti, esterna piu veloce, interna piu lenta
+      int16_t Lm, Rm;
+      if (autoTurnDir > 0) {
+        // curva a destra: sinistra (esterna) veloce, destra (interna) lenta
+        Lm = AUTO_TURN_OUTER;
+        Rm = AUTO_TURN_INNER;
+      } else {
+        // curva a sinistra: destra (esterna) veloce, sinistra (interna) lenta
+        Lm = AUTO_TURN_INNER;
+        Rm = AUTO_TURN_OUTER;
+      }
       motorsSetSmooth(Lm, Rm);
 
       if (now - autoTs >= AUTO_TURN_MS) {
@@ -646,7 +639,6 @@ static void runAuto(bool backObs) {
     } break;
   }
 }
-
 // =======================================================
 //                      Camera smoothing
 // =======================================================
@@ -664,7 +656,7 @@ static void selfTest() {
   Serial.println("Servo US sweep...");
   for (int a = SERVO_US_MIN_ANG; a <= SERVO_US_MAX_ANG; a += 5) { servoUS_Write(a); delay(20); }
   for (int a = SERVO_US_MAX_ANG; a >= SERVO_US_MIN_ANG; a -= 5) { servoUS_Write(a); delay(20); }
-  servoUS_Write(90);
+  servoUS_Write(SERVO_US_CENTER);
 
   Serial.println("Motors: LEFT forward...");
   motorsSetSmooth(140, 0); delay(700);
@@ -736,7 +728,7 @@ void loop() {
   // FAILSAFE: solo in manuale stop se perdi radio
   if (!msg.autoMode && ageMs > RX_TIMEOUT_MS) {
     motorsStop();
-    servoUS_Write(90);
+    servoUS_Write(SERVO_US_CENTER);
     servoCam_Write(camCur);
     buzzerUpdate(false);
 
@@ -783,7 +775,7 @@ void loop() {
     motorsSetSmooth(m.left, m.right);
 
     // in manual US al centro
-    servoUS_Write(90);
+    servoUS_Write(SERVO_US_CENTER);
 
     // camera da az
     int az = clampInt((int)msg.az, -AX_AY_MAX, AX_AY_MAX);
