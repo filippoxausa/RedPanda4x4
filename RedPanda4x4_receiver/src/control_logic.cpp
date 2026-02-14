@@ -1,74 +1,53 @@
 #include "control_logic.h"
+#include "helpers.h"
 #include <Arduino.h>
 
-static inline int abs16(int16_t v) { return v < 0 ? -v : v; }
+// =======================================================
+//          Quick-fix switches (calibrazione)
+// =======================================================
+static const bool INVERT_THROTTLE_AXIS = true;
+static const bool INVERT_STEER_AXIS    = false;
 
-// MotorCmd accelToMotors(const ControlMsg &a) {
-//   // Deadband: evita tremolii
-//   const int16_t AX_DEADBAND = 3000;
-//   const int16_t AY_DEADBAND = 3000;
+// =======================================================
+//                   Costanti
+// =======================================================
+static const int AX_AY_MAX    = 16200;
+static const int DEADZONE     = 300;
+static const int THR_SNAP_PWM = 35;
 
-//   // “Full tilt” -> comando massimo
-//   const int16_t AX_FULL = 16000;
-//   const int16_t AY_FULL = 16000;
+// =======================================================
+//                  Mixing manuale
+// =======================================================
 
-//   // Spin-in-place se y ~ 0 e x grande
-//   const int16_t SPIN_Y_MAX = 4000;
-//   const int16_t SPIN_X_MIN = 12000;
+MotorCmd accelToMotorsManual(const ControlMsg &a) {
+  int steer = clampInt((int)a.ax, -AX_AY_MAX, AX_AY_MAX);
+  int thr   = clampInt((int)a.ay, -AX_AY_MAX, AX_AY_MAX);
 
-//   int16_t ax = (abs16(a.ax) < AX_DEADBAND) ? 0 : a.ax;
-  // int16_t ay = (abs16(a.ay) < AY_DEADBAND) ? 0 : a.ay;
+  if (INVERT_STEER_AXIS)    steer = -steer;
+  if (INVERT_THROTTLE_AXIS) thr   = -thr;
 
-//   // Se ti va “al contrario”, inverti ay: ay = -ay;
-//   int throttle = (ay * 255) / AY_FULL;  // -255..255
-//   int turn     = (ax * 255) / AX_FULL;  // -255..255
-//   throttle = constrain(throttle, -255, 255);
-//   turn     = constrain(turn, -255, 255);
+  steer = applyDeadzone(steer, DEADZONE);
+  thr   = applyDeadzone(thr,   DEADZONE);
 
-//   // Modalità spin
-//   if (abs16(a.ay) < SPIN_Y_MAX && abs16(a.ax) > SPIN_X_MIN) {
-//     throttle = 0;
-//   }
+  int steerPWM = mapInt(steer, -AX_AY_MAX, AX_AY_MAX, -255, 255);
+  int thrPWM   = mapInt(thr,   -AX_AY_MAX, AX_AY_MAX, -255, 255);
 
-//   // Arcade mixing: L = throttle + turn, R = throttle - turn
-//   int left  = throttle + turn;
-//   int right = throttle - turn;
+  if (abs(thrPWM) < THR_SNAP_PWM) thrPWM = 0;
 
-//   // Saturazione “morbida” (mantiene rapporto)
-//   int m = max(abs(left), abs(right));
-//   if (m > 255) {
-//     left  = (left  * 255) / m;
-//     right = (right * 255) / m;
-//   }
+  int left = 0, right = 0;
 
-//   return MotorCmd{ (int16_t)left, (int16_t)right };
-// }
+  // Spin sul posto: throttle ~ 0 e steer forte
+  const bool wantSpin = (thrPWM == 0) && (abs(steerPWM) > 60);
 
-
-MotorCmd accelToMotors(const ControlMsg &a) {
-  const int16_t DEADBAND = 3000;
-
-  int16_t x = (abs16(a.ax) < DEADBAND) ? 0 : a.ax;
-  int16_t y = (abs16(a.ay) < DEADBAND) ? 0 : a.ay;
-
-  int throttle = 0;
-  int turn = 0;
-
-  if (y != 0) {
-    throttle = (y * 255) / 16000;
-    throttle = constrain(throttle, -255, 255);
-    turn = 0;
-  } else if (x != 0) {
-    turn = (x * 255) / 16000;
-    turn = constrain(turn, -255, 255);
-    throttle = 0;
+  if (wantSpin) {
+    int spin = clampInt(steerPWM / 2, -255, 255);
+    left  = spin;
+    right = -spin;
+  } else {
+    int steerScaled = (steerPWM * abs(thrPWM)) / 255;
+    left  = clampInt(thrPWM + steerScaled, -255, 255);
+    right = clampInt(thrPWM - steerScaled, -255, 255);
   }
-
-  int left  = throttle + turn;
-  int right = throttle - turn; // mixing arcade: left=x+y, right=y-x (equivalente)
-
-  left  = constrain(left,  -255, 255);
-  right = constrain(right, -255, 255);
 
   return MotorCmd{ (int16_t)left, (int16_t)right };
 }

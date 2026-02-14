@@ -2,5 +2,6 @@
 #include <stdint.h>
 
 typedef struct __attribute__((packed)) {
-  int16_t ax, ay, az;
+  bool    autoMode;
+  int16_t ax, ay, az;   // manual: steer / throttle / camPan (scaled)
 } ControlMsg;
