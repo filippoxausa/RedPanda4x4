@@ -5,7 +5,7 @@
 
 class EspNowSender {
 public:
-  bool begin(const uint8_t peerMac[6]);
+  bool begin(const uint8_t peerMac[6], uint8_t channel = 1);
   bool send(const uint8_t peerMac[6], const ControlMsg &msg);
 
 private:

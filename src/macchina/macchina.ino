@@ -1,0 +1,804 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <string.h>
+#include <Wire.h>
+
+// Display (I2C OLED tipo SSD1306)
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+#include <esp_arduino_version.h>
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  #include <esp_wifi.h>
+#endif
+
+// =======================================================
+//                QUICK FIX SWITCHES (CALIBRAZIONE)
+// =======================================================
+static const bool INVERT_THROTTLE_AXIS = true;
+static const bool INVERT_STEER_AXIS    = false;
+
+static const bool INVERT_LEFT_MOTOR    = false;
+static const bool INVERT_RIGHT_MOTOR   = true;
+
+// =======================================================
+//                    BUZZER
+// =======================================================
+static const int PIN_BUZZER = 5;          // collegare qui il buzzer
+static const int BUZZ_CH    = 7;          // canale LEDC libero
+static const int BUZZ_RES   = 10;
+static const int BUZZ_FREQ  = 2000;       // Hz (passivo). Con attivo fa comunque beep
+static const uint32_t BEEP_ON_MS  = 120;
+static const uint32_t BEEP_OFF_MS = 120;
+
+// =======================================================
+//                    CONTROL MSG (packed)
+// =======================================================
+typedef struct __attribute__((packed)) {
+  bool    autoMode;
+  int16_t ax, ay, az; // manual: steer/throttle/camPan (scaled)
+} ControlMsg;
+
+struct MotorCmd { int16_t left; int16_t right; };
+
+// =======================================================
+//                       ESPNOW RX
+// =======================================================
+class EspNowReceiver {
+public:
+  bool begin();
+  void getLatest(ControlMsg &out, uint32_t &ageMs) const;
+
+private:
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  static void onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len);
+#else
+  static void onRecv(const uint8_t *mac, const uint8_t *data, int len);
+#endif
+
+  static volatile bool     s_auto;
+  static volatile int16_t  s_ax, s_ay, s_az;
+  static volatile uint32_t s_lastRxMs;
+};
+
+volatile bool     EspNowReceiver::s_auto = false;
+volatile int16_t  EspNowReceiver::s_ax   = 0;
+volatile int16_t  EspNowReceiver::s_ay   = 0;
+volatile int16_t  EspNowReceiver::s_az   = 0;
+volatile uint32_t EspNowReceiver::s_lastRxMs = 0;
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+void EspNowReceiver::onRecv(const esp_now_recv_info_t *info, const uint8_t *data, int len) {
+  (void)info;
+  if (len != (int)sizeof(ControlMsg)) return;
+  ControlMsg msg;
+  memcpy(&msg, data, sizeof(msg));
+  s_auto = msg.autoMode;
+  s_ax = msg.ax; s_ay = msg.ay; s_az = msg.az;
+  s_lastRxMs = millis();
+}
+#else
+void EspNowReceiver::onRecv(const uint8_t *mac, const uint8_t *data, int len) {
+  (void)mac;
+  if (len != (int)sizeof(ControlMsg)) return;
+  ControlMsg msg;
+  memcpy(&msg, data, sizeof(msg));
+  s_auto = msg.autoMode;
+  s_ax = msg.ax; s_ay = msg.ay; s_az = msg.az;
+  s_lastRxMs = millis();
+}
+#endif
+
+bool EspNowReceiver::begin() {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  if (esp_now_init() != ESP_OK) return false;
+  esp_now_register_recv_cb(EspNowReceiver::onRecv);
+  s_lastRxMs = millis();
+  return true;
+}
+
+void EspNowReceiver::getLatest(ControlMsg &out, uint32_t &ageMs) const {
+  out.autoMode = s_auto;
+  out.ax = s_ax; out.ay = s_ay; out.az = s_az;
+  ageMs = millis() - (uint32_t)s_lastRxMs;
+}
+
+// =======================================================
+//                    MOTOR TB6612FNG
+// =======================================================
+static const int PIN_AIN1 = 14;
+static const int PIN_AIN2 = 27;
+static const int PIN_PWMA = 26;
+
+static const int PIN_BIN1 = 16;
+static const int PIN_BIN2 = 17;
+static const int PIN_PWMB = 4;
+
+static const int PIN_STBY = 25;
+
+static const int PWM_FREQ = 20000;
+static const int PWM_RES  = 8;
+static const int CH_A = 0; // left
+static const int CH_B = 1; // right
+
+static void motorEnable(bool en) { digitalWrite(PIN_STBY, en ? HIGH : LOW); }
+
+static void ledcWriteCompat(int ch, uint32_t duty) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWriteChannel(ch, duty);
+#else
+  ledcWrite(ch, duty);
+#endif
+}
+
+static void driveMotor(int in1, int in2, int pwmCh, int speed) {
+  speed = constrain(speed, -255, 255);
+
+  if (speed > 0) {
+    digitalWrite(in1, HIGH); digitalWrite(in2, LOW);
+    ledcWriteCompat(pwmCh, (uint32_t)speed);
+  } else if (speed < 0) {
+    digitalWrite(in1, LOW); digitalWrite(in2, HIGH);
+    ledcWriteCompat(pwmCh, (uint32_t)(-speed));
+  } else {
+    digitalWrite(in1, LOW); digitalWrite(in2, LOW);
+    ledcWriteCompat(pwmCh, 0);
+  }
+}
+
+static void driveLeft(int speed)  { if (INVERT_LEFT_MOTOR) speed = -speed; driveMotor(PIN_AIN1, PIN_AIN2, CH_A, speed); }
+static void driveRight(int speed) { if (INVERT_RIGHT_MOTOR) speed = -speed; driveMotor(PIN_BIN1, PIN_BIN2, CH_B, speed); }
+
+static void motorsInit() {
+  pinMode(PIN_AIN1, OUTPUT); pinMode(PIN_AIN2, OUTPUT);
+  pinMode(PIN_BIN1, OUTPUT); pinMode(PIN_BIN2, OUTPUT);
+  pinMode(PIN_STBY, OUTPUT);
+
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttachChannel(PIN_PWMA, PWM_FREQ, PWM_RES, CH_A);
+  ledcAttachChannel(PIN_PWMB, PWM_FREQ, PWM_RES, CH_B);
+#else
+  ledcSetup(CH_A, PWM_FREQ, PWM_RES); ledcAttachPin(PIN_PWMA, CH_A);
+  ledcSetup(CH_B, PWM_FREQ, PWM_RES); ledcAttachPin(PIN_PWMB, CH_B);
+#endif
+
+  motorEnable(true);
+  driveLeft(0); driveRight(0);
+}
+
+static void motorsRaw(int16_t left, int16_t right) {
+  driveLeft(left);
+  driveRight(right);
+}
+
+// anti-slip / rampa
+static int16_t g_curL = 0, g_curR = 0;
+static const int16_t RAMP_STEP = 14;
+static const int16_t DIFF_MAX  = 230;
+
+static int16_t stepToward(int16_t cur, int16_t tgt, int16_t step) {
+  if (tgt > cur) return (int16_t)min<int>(tgt, cur + step);
+  if (tgt < cur) return (int16_t)max<int>(tgt, cur - step);
+  return cur;
+}
+
+static void motorsSetSmooth(int16_t targetL, int16_t targetR) {
+  targetL = constrain(targetL, -255, 255);
+  targetR = constrain(targetR, -255, 255);
+
+  int diff = targetL - targetR;
+  if (diff > DIFF_MAX) {
+    int mid = (targetL + targetR) / 2;
+    targetL = mid + DIFF_MAX/2;
+    targetR = mid - DIFF_MAX/2;
+  } else if (diff < -DIFF_MAX) {
+    int mid = (targetL + targetR) / 2;
+    targetL = mid - DIFF_MAX/2;
+    targetR = mid + DIFF_MAX/2;
+  }
+
+  g_curL = stepToward(g_curL, targetL, RAMP_STEP);
+  g_curR = stepToward(g_curR, targetR, RAMP_STEP);
+  motorsRaw(g_curL, g_curR);
+}
+
+static void motorsStop() { motorsSetSmooth(0, 0); }
+
+// =======================================================
+//                 Helpers
+// =======================================================
+static inline int clampInt(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
+
+static inline int mapInt(int x, int inMin, int inMax, int outMin, int outMax) {
+  long num = (long)(x - inMin) * (outMax - outMin);
+  long den = (inMax - inMin);
+  return (int)(outMin + num / den);
+}
+
+static inline int applyDeadzone(int v, int dz) {
+  if (abs(v) < dz) return 0;
+  return (v > 0) ? (v - dz) : (v + dz);
+}
+
+// =======================================================
+//                MANUAL: joystick -> motors
+// =======================================================
+static const int AX_AY_MAX = 16200;
+static const int DEADZONE  = 300;
+static const int THR_SNAP_PWM = 35;
+
+static MotorCmd accelToMotorsManual(ControlMsg a) {
+  int steer = clampInt((int)a.ax, -AX_AY_MAX, AX_AY_MAX);
+  int thr   = clampInt((int)a.ay, -AX_AY_MAX, AX_AY_MAX);
+
+  if (INVERT_STEER_AXIS) steer = -steer;
+  if (INVERT_THROTTLE_AXIS) thr = -thr;
+
+  steer = applyDeadzone(steer, DEADZONE);
+  thr   = applyDeadzone(thr,   DEADZONE);
+
+  int steerPWM = mapInt(steer, -AX_AY_MAX, AX_AY_MAX, -255, 255);
+  int thrPWM   = mapInt(thr,   -AX_AY_MAX, AX_AY_MAX, -255, 255);
+
+  if (abs(thrPWM) < THR_SNAP_PWM) thrPWM = 0;
+
+  int left = 0, right = 0;
+
+  const bool wantSpin = (thrPWM == 0) && (abs(steerPWM) > 60);
+
+  if (wantSpin) {
+    int spin = clampInt(steerPWM / 2, -255, 255);
+    left  = spin;
+    right = -spin;
+  } else {
+    int steerScaled = (steerPWM * abs(thrPWM)) / 255;
+    left  = clampInt(thrPWM + steerScaled, -255, 255);
+    right = clampInt(thrPWM - steerScaled, -255, 255);
+  }
+
+  return MotorCmd{ (int16_t)left, (int16_t)right };
+}
+
+// =======================================================
+//           IR reverse sensor (DIGITAL obstacle)
+// =======================================================
+static const int  PIN_IR_BACK = 23;
+static const bool IR_ACTIVE_LOW = true;
+
+static void irInit() {
+  pinMode(PIN_IR_BACK, IR_ACTIVE_LOW ? INPUT_PULLUP : INPUT_PULLDOWN);
+}
+static bool irBackObstacle() {
+  int v = digitalRead(PIN_IR_BACK);
+  return IR_ACTIVE_LOW ? (v == LOW) : (v == HIGH);
+}
+
+// =======================================================
+//                    SERVO + HC-SR04
+// =======================================================
+static const int PIN_SERVO_US  = 33;
+static const int PIN_SERVO_CAM = 32;
+
+static const int PIN_TRIG = 18;
+static const int PIN_ECHO = 19;
+
+static const int SERVO_FREQ = 50;
+static const int SERVO_RES  = 16;
+static const int CH_SERVO_US  = 2;
+static const int CH_SERVO_CAM = 3;
+
+static const int SERVO_MIN_US = 650;
+static const int SERVO_MAX_US = 2350;
+
+static int SERVO_US_CENTER  = 40;  // angolo "dritto avanti" (era 90)
+static int SERVO_US_MIN_ANG = 0;   // era 55  (+15)
+static int SERVO_US_MAX_ANG = 80;  // era 140 (+15)
+
+static int SERVO_CAM_MIN_ANG = 35;
+static int SERVO_CAM_MAX_ANG = 145;
+
+static inline uint32_t servoDutyFromUs(int pulseUs) {
+  const int periodUs = 20000;
+  pulseUs = clampInt(pulseUs, SERVO_MIN_US, SERVO_MAX_US);
+  const uint32_t maxDuty = (1UL << SERVO_RES) - 1;
+  return (uint32_t)((uint64_t)pulseUs * maxDuty / periodUs);
+}
+
+static void servoWriteAngleRaw(int ch, int angleDeg) {
+  int pulseUs = mapInt(angleDeg, 0, 180, SERVO_MIN_US, SERVO_MAX_US);
+  uint32_t duty = servoDutyFromUs(pulseUs);
+  ledcWriteCompat(ch, duty);
+}
+
+static void servoUS_Write(int ang) {
+  ang = clampInt(ang, SERVO_US_MIN_ANG, SERVO_US_MAX_ANG);
+  servoWriteAngleRaw(CH_SERVO_US, ang);
+}
+
+static void servoCam_Write(int ang) {
+  ang = clampInt(ang, SERVO_CAM_MIN_ANG, SERVO_CAM_MAX_ANG);
+  servoWriteAngleRaw(CH_SERVO_CAM, ang);
+}
+
+static void servosInit() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttachChannel(PIN_SERVO_US,  SERVO_FREQ, SERVO_RES, CH_SERVO_US);
+  ledcAttachChannel(PIN_SERVO_CAM, SERVO_FREQ, SERVO_RES, CH_SERVO_CAM);
+#else
+  ledcSetup(CH_SERVO_US, SERVO_FREQ, SERVO_RES);  ledcAttachPin(PIN_SERVO_US, CH_SERVO_US);
+  ledcSetup(CH_SERVO_CAM, SERVO_FREQ, SERVO_RES); ledcAttachPin(PIN_SERVO_CAM, CH_SERVO_CAM);
+#endif
+  servoUS_Write(SERVO_US_CENTER);
+  servoCam_Write(90);
+}
+
+static void hcsr04Init() {
+  pinMode(PIN_TRIG, OUTPUT);
+  pinMode(PIN_ECHO, INPUT);
+  digitalWrite(PIN_TRIG, LOW);
+}
+
+static uint16_t hcsr04ReadCm() {
+  digitalWrite(PIN_TRIG, LOW);
+  delayMicroseconds(2);
+  digitalWrite(PIN_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_TRIG, LOW);
+
+  uint32_t us = pulseIn(PIN_ECHO, HIGH, 25000);
+  if (us == 0) return 999;
+  return (uint16_t)(us / 58);
+}
+
+static inline uint16_t clampDist(uint16_t d) {
+  if (d == 0) return 999;
+  if (d > 400) return 999;
+  return d;
+}
+
+// =======================================================
+//  DISPLAY (SSD1306 I2C)
+// =======================================================
+static const int SCREEN_W = 128;
+static const int SCREEN_H = 64;
+static const int OLED_ADDR = 0x3C;     // spesso 0x3C (a volte 0x3D)
+Adafruit_SSD1306 display(SCREEN_W, SCREEN_H, &Wire, -1);
+
+static void drawHappy() {
+  display.clearDisplay();
+  // occhi
+  display.fillCircle(44, 24, 5, SSD1306_WHITE);
+  display.fillCircle(84, 24, 5, SSD1306_WHITE);
+  // sorriso
+  display.drawCircle(64, 44, 20, SSD1306_WHITE);
+  // “taglia” parte alta per farlo diventare sorriso
+  display.fillRect(44, 24, 40, 20, SSD1306_BLACK);
+  display.display();
+}
+
+static void drawSad() {
+  display.clearDisplay();
+  // occhi
+  display.fillCircle(44, 24, 5, SSD1306_WHITE);
+  display.fillCircle(84, 24, 5, SSD1306_WHITE);
+  // bocca triste (arco rovesciato)
+  display.drawCircle(64, 60, 20, SSD1306_WHITE);
+  display.fillRect(44, 60, 40, 20, SSD1306_BLACK);
+  display.display();
+}
+
+static void drawProjectName() {
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 22);
+  display.print("RedPanda");
+  display.setCursor(0, 44);
+  display.print("4x4");
+  display.display();
+}
+
+// =======================================================
+//  BUZZER: beep mentre in retromarcia
+// =======================================================
+static bool buzOn = false;
+static uint32_t buzT0 = 0;
+
+static void buzzerInit() {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttachChannel(PIN_BUZZER, BUZZ_FREQ, BUZZ_RES, BUZZ_CH);
+  // per far suonare: ledcWriteTone(BUZZ_CH, freq)
+#else
+  ledcSetup(BUZZ_CH, 2000, BUZZ_RES);
+  ledcAttachPin(PIN_BUZZER, BUZZ_CH);
+#endif
+  buzOn = false;
+  buzT0 = millis();
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcWriteTone(PIN_BUZZER, 0);   // Core3: vuole il PIN, non il canale!
+#else
+  ledcWrite(BUZZ_CH, 0);
+#endif
+}
+
+static void buzzerSet(bool on) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  if (on) ledcWriteTone(PIN_BUZZER, BUZZ_FREQ);   // Core3: vuole il PIN
+  else    ledcWriteTone(PIN_BUZZER, 0);
+#else
+  // fallback: PWM fisso (non proprio "tono" come ESP32 core3)
+  ledcWrite(BUZZ_CH, on ? (1 << (BUZZ_RES - 1)) : 0);
+#endif
+}
+
+static void buzzerUpdate(bool wantBeep) {
+  uint32_t now = millis();
+  if (!wantBeep) {
+    if (buzOn) { buzOn = false; buzzerSet(false); }
+    buzT0 = now;
+    return;
+  }
+
+  if (!buzOn) {
+    if (now - buzT0 >= BEEP_OFF_MS) {
+      buzOn = true;
+      buzT0 = now;
+      buzzerSet(true);
+    }
+  } else {
+    if (now - buzT0 >= BEEP_ON_MS) {
+      buzOn = false;
+      buzT0 = now;
+      buzzerSet(false);
+    }
+  }
+}
+
+// =======================================================
+//  AUTO: evita ostacoli con scansione ultrasuoni
+// =======================================================
+static const uint16_t AUTO_FRONT_TRIG_CM = 15;    // soglia ostacolo frontale (cm)
+static const uint16_t AUTO_SIDE_FREE_CM  = 25;    // lato considerato "libero" (cm)
+
+static const int16_t  AUTO_FWD_SPEED  = 160;
+static const int16_t  AUTO_BACK_SPEED = 150;
+
+// Curva ad arco: ruota esterna veloce, interna lenta (stessa direzione = arco, non giro sul posto)
+static const int16_t  AUTO_TURN_OUTER = 200;      // ruota esterna
+static const int16_t  AUTO_TURN_INNER = 60;       // ruota interna (lenta, stessa direzione)
+static const uint32_t AUTO_TURN_MS    = 1100;     // durata curva
+
+static const uint32_t AUTO_STOP_MS   = 100;       // breve pausa prima dello scan
+static const uint32_t AUTO_BACK_MS   = 1000;      // retromarcia ~1 secondo
+
+static const uint32_t SCAN_SERVO_SETTLE_MS = 450; // tempo per il servo di raggiungere la posizione
+
+static uint16_t dL = 999, dR = 999;
+static uint8_t  scanPhase = 0;        // sotto-fase dello scan (0..3)
+
+enum AutoState : uint8_t { A_FWD=0, A_STOP, A_SCAN, A_BACK, A_TURN };
+static AutoState autoSt = A_FWD;
+static uint32_t  autoTs = 0;
+static int8_t    autoTurnDir = +1;    // +1=destra, -1=sinistra
+
+// stato "per display"
+static bool g_autoObstacle = false;   // TRUE se "vede ostacolo"
+static bool g_isReverseNow = false;   // per buzzer retromarcia
+
+static void autoReset() {
+  autoSt = A_FWD;
+  autoTs = millis();
+  autoTurnDir = +1;
+  scanPhase = 0;
+  servoUS_Write(SERVO_US_CENTER);
+  dL = dR = 999;
+  g_autoObstacle = false;
+  g_isReverseNow = false;
+}
+
+static void runAuto(bool backObs) {
+  const uint32_t now = millis();
+  g_isReverseNow = false;
+
+  switch (autoSt) {
+
+    // ---- avanti dritto, controlla davanti ----
+    case A_FWD: {
+      servoUS_Write(SERVO_US_CENTER);
+      motorsSetSmooth(AUTO_FWD_SPEED, AUTO_FWD_SPEED);
+
+      uint16_t front = clampDist(hcsr04ReadCm());
+      g_autoObstacle = (front <= AUTO_FRONT_TRIG_CM);
+
+      if (front <= AUTO_FRONT_TRIG_CM) {
+        motorsStop();
+        autoSt = A_STOP;
+        autoTs = now;
+      }
+    } break;
+
+    // ---- breve pausa, poi scansione ----
+    case A_STOP: {
+      motorsStop();
+      servoUS_Write(SERVO_US_CENTER);
+      g_autoObstacle = true;
+
+      if (now - autoTs >= AUTO_STOP_MS) {
+        scanPhase = 0;
+        dL = dR = 999;
+        autoSt = A_SCAN;
+        autoTs = now;
+      }
+    } break;
+
+    // ---- guarda a sinistra, poi a destra, poi decidi ----
+    case A_SCAN: {
+      motorsStop();
+      g_autoObstacle = true;
+
+      switch (scanPhase) {
+        case 0:
+          // muovi servo a sinistra (angolo max)
+          servoUS_Write(SERVO_US_MAX_ANG);
+          scanPhase = 1;
+          autoTs = now;
+          break;
+
+        case 1:
+          // aspetta che il servo arrivi, poi leggi distanza sinistra
+          if (now - autoTs >= SCAN_SERVO_SETTLE_MS) {
+            dL = clampDist(hcsr04ReadCm());
+            // ora muovi servo a destra (angolo min)
+            servoUS_Write(SERVO_US_MIN_ANG);
+            scanPhase = 2;
+            autoTs = now;
+          }
+          break;
+
+        case 2:
+          // aspetta che il servo arrivi, poi leggi distanza destra
+          if (now - autoTs >= SCAN_SERVO_SETTLE_MS) {
+            dR = clampDist(hcsr04ReadCm());
+            // ricentra il servo
+            servoUS_Write(SERVO_US_CENTER);
+            scanPhase = 3;
+            autoTs = now;
+          }
+          break;
+
+        case 3: {
+          // decidi direzione
+          bool leftFree  = (dL >= AUTO_SIDE_FREE_CM);
+          bool rightFree = (dR >= AUTO_SIDE_FREE_CM);
+
+          if (!leftFree && !rightFree) {
+            // entrambi bloccati -> retromarcia, poi ri-scan
+            autoSt = A_BACK;
+            autoTs = now;
+          } else {
+            // scegli il lato piu libero
+            if (leftFree && !rightFree)       autoTurnDir = -1;  // curva a sinistra
+            else if (!leftFree && rightFree)  autoTurnDir = +1;  // curva a destra
+            else autoTurnDir = (dL >= dR) ? -1 : +1;            // prendi il piu ampio
+
+            autoSt = A_TURN;
+            autoTs = now;
+          }
+        } break;
+      }
+    } break;
+
+    // ---- retromarcia ~1 s, poi ri-scan ----
+    case A_BACK: {
+      g_autoObstacle = true;
+      g_isReverseNow = true;
+
+      if (backObs) {
+        // sensore IR dietro vede ostacolo -> ferma e prova a girare comunque
+        motorsStop();
+        autoTurnDir = -autoTurnDir;
+        autoSt = A_TURN;
+        autoTs = now;
+        break;
+      }
+
+      motorsSetSmooth(-AUTO_BACK_SPEED, -AUTO_BACK_SPEED);
+
+      if (now - autoTs >= AUTO_BACK_MS) {
+        motorsStop();
+        autoSt = A_STOP;   // torna a STOP -> ri-scan
+        autoTs = now;
+      }
+    } break;
+
+    // ---- curva ad arco (non giro sul posto) ----
+    case A_TURN: {
+      g_autoObstacle = true;
+      servoUS_Write(SERVO_US_CENTER);
+
+      // Entrambe le ruote avanti, esterna piu veloce, interna piu lenta
+      int16_t Lm, Rm;
+      if (autoTurnDir > 0) {
+        // curva a destra: sinistra (esterna) veloce, destra (interna) lenta
+        Lm = AUTO_TURN_OUTER;
+        Rm = AUTO_TURN_INNER;
+      } else {
+        // curva a sinistra: destra (esterna) veloce, sinistra (interna) lenta
+        Lm = AUTO_TURN_INNER;
+        Rm = AUTO_TURN_OUTER;
+      }
+      motorsSetSmooth(Lm, Rm);
+
+      if (now - autoTs >= AUTO_TURN_MS) {
+        motorsStop();
+        autoSt = A_FWD;
+        autoTs = now;
+      }
+    } break;
+  }
+}
+// =======================================================
+//                      Camera smoothing
+// =======================================================
+static int camCur = 90;
+static int camTgt = 90;
+static const uint32_t CAM_STEP_MS = 35;
+static const int CAM_STEP_DEG = 1;
+static uint32_t lastCamMs = 0;
+
+// =======================================================
+//                  STARTUP SELF-TEST
+// =======================================================
+static void selfTest() {
+  Serial.println("\n--- SELF TEST ---");
+  Serial.println("Servo US sweep...");
+  for (int a = SERVO_US_MIN_ANG; a <= SERVO_US_MAX_ANG; a += 5) { servoUS_Write(a); delay(20); }
+  for (int a = SERVO_US_MAX_ANG; a >= SERVO_US_MIN_ANG; a -= 5) { servoUS_Write(a); delay(20); }
+  servoUS_Write(SERVO_US_CENTER);
+
+  Serial.println("Motors: LEFT forward...");
+  motorsSetSmooth(140, 0); delay(700);
+  motorsStop(); delay(300);
+
+  Serial.println("Motors: RIGHT forward...");
+  motorsSetSmooth(0, 140); delay(700);
+  motorsStop(); delay(300);
+
+  Serial.println("Motors: BOTH forward...");
+  motorsSetSmooth(140, 140); delay(700);
+  motorsStop(); delay(300);
+
+  Serial.println("--- END SELF TEST ---\n");
+}
+
+// =======================================================
+//                         MAIN
+// =======================================================
+static EspNowReceiver rx;
+static const uint32_t RX_TIMEOUT_MS = 250;
+
+// display update throttling
+static uint32_t lastDispMs = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+
+  motorsInit();
+  servosInit();
+  hcsr04Init();
+  irInit();
+  buzzerInit();
+
+  // I2C for display
+  Wire.begin(21, 22);
+
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
+    Serial.println("[OLED] init FAILED (addr 0x3C?). Prova 0x3D se non va.");
+  } else {
+    display.clearDisplay();
+    display.display();
+    drawProjectName();
+  }
+
+  Serial.print("RX STA MAC: ");
+  Serial.println(WiFi.macAddress());
+
+  if (!rx.begin()) {
+    Serial.println("ESP-NOW init FAILED!");
+    motorsStop();
+    while (true) delay(1000);
+  }
+
+  motorsStop();
+  autoReset();
+  selfTest();
+}
+
+void loop() {
+  ControlMsg msg{};
+  uint32_t ageMs = 0;
+  rx.getLatest(msg, ageMs);
+
+  const uint32_t now = millis();
+  const bool backObs = irBackObstacle();
+
+  // FAILSAFE: solo in manuale stop se perdi radio
+  if (!msg.autoMode && ageMs > RX_TIMEOUT_MS) {
+    motorsStop();
+    servoUS_Write(SERVO_US_CENTER);
+    servoCam_Write(camCur);
+    buzzerUpdate(false);
+
+    // display: progetto
+    if (now - lastDispMs > 120) {
+      lastDispMs = now;
+      drawProjectName();
+    }
+
+    delay(5);
+    return;
+  }
+
+  bool wantReverseBeep = false;
+
+  if (msg.autoMode) {
+    runAuto(backObs);
+    camTgt = 90;
+    wantReverseBeep = g_isReverseNow;
+
+    // display in AUTO: smile / sad
+    if (now - lastDispMs > 120) {
+      lastDispMs = now;
+      if (g_autoObstacle) drawSad();
+      else drawHappy();
+    }
+
+  } else {
+    autoReset();
+
+    MotorCmd m = accelToMotorsManual(msg);
+
+    // blocco retro se IR vede ostacolo
+    const int ayEff = INVERT_THROTTLE_AXIS ? -msg.ay : msg.ay;
+    const bool wantReverse = (ayEff < -DEADZONE);
+    wantReverseBeep = wantReverse;  // beep se stai chiedendo retromarcia
+
+    if (wantReverse && backObs) {
+      if (m.left < 0)  m.left = 0;
+      if (m.right < 0) m.right = 0;
+      wantReverseBeep = false; // non sta andando davvero indietro
+    }
+
+    motorsSetSmooth(m.left, m.right);
+
+    // in manual US al centro
+    servoUS_Write(SERVO_US_CENTER);
+
+    // camera da az
+    int az = clampInt((int)msg.az, -AX_AY_MAX, AX_AY_MAX);
+    camTgt = mapInt(az, -AX_AY_MAX, AX_AY_MAX, 0, 180);
+    camTgt = clampInt(camTgt, SERVO_CAM_MIN_ANG, SERVO_CAM_MAX_ANG);
+
+    // display: nome progetto
+    if (now - lastDispMs > 250) {
+      lastDispMs = now;
+      drawProjectName();
+    }
+  }
+
+  // buzzer retromarcia
+  buzzerUpdate(wantReverseBeep);
+
+  // camera smoothing
+  if (now - lastCamMs >= CAM_STEP_MS) {
+    lastCamMs = now;
+    if (camCur < camTgt) camCur += CAM_STEP_DEG;
+    else if (camCur > camTgt) camCur -= CAM_STEP_DEG;
+    servoCam_Write(camCur);
+  }
+
+  delay(5);
+}
