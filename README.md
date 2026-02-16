@@ -5,15 +5,16 @@ RedPanda4x4 is a small 4WD rover controlled by an ESP32-based handheld controlle
 The controller supports **manual driving** (joystick), **tilt driving** (IMU), and an **autonomous mode** (FSM on the vehicle).\
 A separate camera module streams **MJPEG over HTTP**, and a Python script can run **YOLO (ONNX)** on the live stream.
 
-* * * * *
-
 Requirements
 ------------
 
 ### Hardware requirements
 
-**Controller (TX)**
+<p>
+<img src="https://github.com/user-attachments/assets/df5ea54d-8d6e-41c7-a4a7-39ddf8c3f366" width="300px">
+</p>
 
+**Controller (TX)**
 - ESP32 board (controller)
 - analog joysticks
     -   Joystick 1: drive (X/Y) + push button (mode switch)
@@ -40,7 +41,6 @@ Requirements
 
 -   A laptop/PC to run the Python script (MJPEG decode + YOLO ONNX)
 
-* * * * *
 
 ### Software requirements
 
@@ -66,64 +66,67 @@ Requirements
     -   `coco.names`
 
 Install Python deps:
-
-`pip install opencv-python numpy requests`
-
-* * * * *
-
+```
+pip install opencv-python numpy requests
+```
 Project Layout
 --------------
-
-This repository contains both **PlatformIO projects** and a **flat Arduino-style `src/` mirror**.
-
-### Top-level structure (PlatformIO projects)
-
--   `RedPanda4x4_sender/` → controller firmware (TX)
-
--   `RedPanda4x4_receiver/` → vehicle firmware (RX)
-
--   `src/` → Arduino-style copies / additional sketches (camera, monitor, etc.)
-
-### Source code organization
-
-#### Controller (TX) --- `RedPanda4x4_sender/src/`
-
--   `main.cpp` → application entry point
--   `joystick.cpp` → joystick reading, deadzones, mapping
--   `mpu6500_reader.cpp` → IMU init + complementary filter
--   `espnow_sender.cpp` → ESP-NOW setup + send + send-callback
-
-Arduino-style equivalent:
--   `src/senderJoystick/senderJoystick.ino`
-
-#### Vehicle (RX) --- `RedPanda4x4_receiver/src/`
-
--   `main.cpp` → application entry point
--   `espnow_receiver.cpp` → ESP-NOW receive callback + latest message storage
--   `control_logic.cpp` → mixes manual/autonomous commands into actuators
--   `auto_drive.cpp` → autonomous FSM (Forward / Stop / Scan / Back / Turn)
--   `motor_tb6612.cpp` → TB6612 motor control
--   `servo_cam.cpp` → camera pan servo control
--   `servo_ultrasonic.cpp` → ultrasonic scan servo control
--   `ir_sensor.cpp` → IR obstacle detection
--   `display_oled.cpp` → vehicle OLED feedback (if present)
--   `buzzer.cpp` → buzzer feedback (if present)
-
-Arduino-style equivalent:
--   `src/macchina/macchina.ino`
-
-#### Monitor display
-
-Arduino sketch:
--   `src/receiverMonitor/receiverMonitor.ino`\
-    Reads UART and shows decoded telemetry on a TFT screen (`TFT_eSPI`).
-
-#### Camera streaming (optional)
-
--   `src/cam/app_httpd.cpp` → HTTP handlers (`/stream`, `/capture`, `/control`, `/status`, ...)\
-    This is the camera server core (based on Espressif camera web server).
-
-* * * * *
+```
+RedPanda4x4
+├── RedPanda4x4_receiver              # RedPanda4x4_receiver → vehicle firmware (RX)
+│   ├── include
+│   │   ├── auto_drive.h
+│   │   ├── buzzer.h
+│   │   ├── control_logic.h
+│   │   ├── control_msg.h
+│   │   ├── display_oled.h
+│   │   ├── espnow_receiver.h
+│   │   ├── helpers.h
+│   │   ├── ir_sensor.h
+│   │   ├── motor_tb6612.h
+│   │   ├── servo_cam.h
+│   │   └── servo_ultrasonic.h
+│   ├── src
+│   │   ├── auto_drive.cpp            # autonomous FSM (Forward / Stop / Scan / Back / Turn)
+│   │   ├── buzzer.cpp                # buzzer feedback
+│   │   ├── control_logic.cpp         # mixes manual/autonomous commands into actuators
+│   │   ├── display_oled.cpp          # vehicle OLED feedback
+│   │   ├── espnow_receiver.cpp       # ESP-NOW receive callback + latest message storage
+│   │   ├── ir_sensor.cpp             # IR obstacle detection
+│   │   ├── main.cpp
+│   │   ├── motor_tb6612.cpp          # TB6612 motor control
+│   │   ├── servo_cam.cpp             # camera pan servo control
+│   │   └── servo_ultrasonic.cpp      # ultrasonic scan servo control
+├── RedPanda4x4_sender                # RedPanda4x4_sender → controller firmware (TX)
+│   ├── include
+│   │   ├── control_msg.h
+│   │   ├── espnow_sender.h
+│   │   ├── joystick.h
+│   │   └── mpu6500_reader.h
+│   ├── src
+│   │   ├── espnow_sender.cpp         # ESP-NOW setup + send + send-callback
+│   │   ├── joystick.cpp              # Joystick reading, deadzones, mapping
+│   │   ├── main.cpp                   
+│   │   └── mpu6500_reader.cpp        # IMU init + complementary filter
+├── src                               # Arduino-style copies / additional sketches (camera, monitor, etc.)
+│   ├── cam
+│   │   ├── app_httpd.cpp
+│   │   ├── camera_pins.h
+│   │   ├── export_onnx.py
+│   │   ├── script.py
+│   ├── macchina
+│   │   └── macchina.ino
+│   ├── receiverMonitor
+│   │   └── receiverMonitor.ino    
+│   └── senderJoystick
+│       ├── app_httpd.cpp
+│       ├── camera_pins.h
+│       ├── ci.json
+│       ├── partitions.csv
+│       └── senderJoystick.ino
+├── LICENSE
+└── README.md
+```
 
 How to Build, Flash, and Run
 -------------------------------------
@@ -137,7 +140,9 @@ How to Build, Flash, and Run
 3.  Build and upload:
     -   **PlatformIO GUI**: *Build* → *Upload*
     -   or CLI:
-        `pio run -t upload`
+      ```
+        pio run -t upload
+      ```
 4.  In the controller code, ensure these match your setup:
     -   Receiver MAC address (`RX_MAC`)
     -   ESPNOW channel (`ESPNOW_CH`)
@@ -213,6 +218,32 @@ User Guide
     -   (optionally) rotates frames
     -   runs YOLO ONNX every N frames for speed
     -   draws bounding boxes on the live video
+
+## Autonomous Drive Pipeline (FSM)
+
+The autonomous driving logic is implemented as a **Finite State Machine (FSM)**.  
+At each iteration of the main loop, the robot reads the environment (mainly the **ultrasonic distance sensor**) and updates its behavior by switching between a small set of states.
+
+### FSM States
+<img width="754" height="331" alt="image-removebg-preview" src="https://github.com/user-attachments/assets/2967058f-1a31-42fa-a154-c41fee2ad96c" />
+
+The FSM is defined as:
+`enum AutoState : uint8_t { A_FWD=0, A_STOP, A_SCAN, A_BACK, A_TURN };`
+
+**Meaning of each state:**<br>
+A_FWD (Forward): Drive forward with the ultrasonic sensor aligned to the front. Continuously check the front distance.<br>
+A_STOP (Stop): Immediately stop the motors when an obstacle is detected. This is a "safety" state before deciding the next maneuver.<br>
+A_SCAN (Scan left/right): Use the servo-mounted ultrasonic sensor to scan the environment (typically center → left → right) and measure free space.<br>
+A_TURN (Turn): Turn toward the direction that was detected as free during the scan (left or right).<br>
+A_BACK (Reverse): If no safe direction is found, reverse for a short time to create space and retry.<br>
+
+**Transitions (High-level logic):**<br>
+A_FWD → A_STOP when a front obstacle is closer than a threshold.<br>
+A_STOP → A_SCAN after a short stabilization delay.<br>
+A_SCAN → A_TURN if at least one direction (left/right) is free.<br>
+A_SCAN → A_BACK if no direction is free.<br>
+A_BACK → A_SCAN after reversing for a fixed duration (retry the scan).<br>
+A_TURN → A_FWD after completing the turn (resume forward motion).
 
 Links
 -----
