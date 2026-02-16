@@ -1,171 +1,231 @@
-# RedPanda4x4 🐼🚗  
-Embedded Systems Project – 4WD Telemetry & Control Platform
+RedPanda4x4
+===============================================================================
 
----
+RedPanda4x4 is a small 4WD rover controlled by an ESP32-based handheld controller using **ESP-NOW**.\
+The controller supports **manual driving** (joystick), **tilt driving** (IMU), and an **autonomous mode** (FSM on the vehicle).\
+A separate camera module streams **MJPEG over HTTP**, and a Python script can run **YOLO (ONNX)** on the live stream.
 
-## 📌 Overview
+* * * * *
 
-**RedPanda4x4** is a 4WD platform designed as an Embedded Systems project:  
-a **four-wheel-drive vehicle** controlled by a **wireless steering wheel** with sensors and real-time telemetry.
+Requirements
+------------
 
-Main idea:
+### Hardware requirements
 
-- In your hands you have a **steering controller** with:
-  - an **MSP432** (or ESP32, depending on the chosen architecture),
-  - a **gyroscope** to measure the steering angle,
-  - a **display** to show speed and other real-time data.
-- On the car you have:
-  - another **board (MSP432 or ESP32)** that controls the motors via **TB6612FNG**,
-  - various **sensors** (ultrasonic sensor, temperature sensor, line follower, solar panel, etc.),
-  - an **ESP32** for the wireless link with the steering wheel.
+**Controller (TX)**
 
-The goal is to implement:
-- full **4WD control** (forward/backward, turning, braking),
-- **bidirectional telemetry** (commands from steering wheel → car, sensor data from car → steering wheel),
-- a **modular system** that can be extended with new sensors/features.
+- ESP32 board (controller)
+- analog joysticks
+    -   Joystick 1: drive (X/Y) + push button (mode switch)
+    -   Joystick 2: camera pan (X) + push button (center camera)
+-   IMU **MPU6500** (I2C)
+-   **CYD / TFT display board** (monitor) connected to controller via UART
 
----
+**Vehicle (RX)**
 
-## 🧱 Possible Architectures
+-   ESP32 board (vehicle)
+-   **TB6612FNG** motor driver + 4 DC motors (4WD chassis)
+-   Obstacle sensors:
+    -   IR sensor(s)
+    -   Ultrasonic sensor + servo (scan)
+-   Camera pan servo
+-   OLED display + buzzer (vehicle feedback)
 
-We are considering two main architectures for splitting roles between **MSP432** and **ESP32**.
+**Camera streaming**
 
-### 🔹 Option A – MSP432 in the steering wheel, ESP32 on the car
+-   ESP32-CAM (or ESP32 with camera support)
+-   Camera module + LED flash
 
-**Steering wheel (in hand)**  
-- **MSP432** as main MCU:
-  - reads the **gyroscope** (steering angle),
-  - handles user inputs (throttle, brake, mode selection),
-  - updates the **display** (speed, battery status, sensor data, etc.),
-  - communicates over **UART** with a locally connected **ESP32**.
-- **ESP32 (steering side)**:
-  - receives data from the MSP432 via UART,
-  - sends commands to the car through a **wireless** link (e.g. Wi-Fi or ESP-NOW),
-  - receives telemetry from the car and forwards it to the MSP432.
+**Host PC (for vision demo)**
 
-**Car (4x4)**  
-- **ESP32 (car side)**:
-  - receives control commands from the steering wheel,
-  - sends sensor data and system status back to the steering wheel,
-  - acts as a “bridge” between the wireless link and the motor/sensor controller (if a separate MSP is used).
-- **MSP432 (car side, optional)**:
-  - performs **motor control** using the **TB6612FNG** driver,
-  - reads all **on-board sensors** (ultrasonic, line follower, temperature, solar panel, etc.),
-  - computes derived quantities (e.g. speed, estimated distance).
-- **Motor driver**:
-  - **TB6612FNG** connected to the 4WD chassis motors (non-steering chassis, turning is done by differential wheel control).
-- **On-board sensors (modular list)**:
-  - **Ultrasonic sensor** (for obstacle detection and distance measurement),
-  - **Temperature sensor** (ambient or motor/battery temperature),
-  - **Solar panel** with voltage/current sensing (power harvesting monitoring),
-  - **Line follower** (IR sensor array to follow a line on the ground),
-  - Additional sensors (optional): IMU on the car, light sensor, battery monitor, etc.
+-   A laptop/PC to run the Python script (MJPEG decode + YOLO ONNX)
 
----
+* * * * *
 
-### 🔹 Option B – ESP32 in the steering wheel, MSP432 on the car
+### Software requirements
 
-Alternatively, we can swap roles:
+**Firmware**
 
-**Steering wheel (in hand)**  
-- **ESP32**:
-  - directly reads the **gyroscope** and user inputs,
-  - manages the **display** and user interface logic,
-  - communicates **wirelessly** directly with the car (no UART needed on the steering side).
+-   **VS Code + PlatformIO** (recommended)
+    -   or Arduino IDE with ESP32 core installed
+-   ESP32 board support package (Arduino core / PlatformIO platform)
+-   Libraries used in the sketches/projects (typical):
+    -   `esp_now`, `WiFi`, `Wire`
+    -   `TFT_eSPI` (monitor display)
+    -   `esp32-camera` components (camera server)
+
+**Python (vision demo)**
+
+-   Python 3.9+
+-   Packages:
+    -   `opencv-python`
+    -   `numpy`
+    -   `requests`
+-   Model files in the same folder as the script:
+    -   `yolov8n.onnx`
+    -   `coco.names`
+
+Install Python deps:
+
+`pip install opencv-python numpy requests`
+
+* * * * *
+
+Project Layout
+--------------
+
+This repository contains both **PlatformIO projects** and a **flat Arduino-style `src/` mirror**.
+
+### Top-level structure (PlatformIO projects)
+
+-   `RedPanda4x4_sender/` → controller firmware (TX)
+
+-   `RedPanda4x4_receiver/` → vehicle firmware (RX)
+
+-   `src/` → Arduino-style copies / additional sketches (camera, monitor, etc.)
+
+### Source code organization
+
+#### Controller (TX) --- `RedPanda4x4_sender/src/`
+
+-   `main.cpp` → application entry point
+-   `joystick.cpp` → joystick reading, deadzones, mapping
+-   `mpu6500_reader.cpp` → IMU init + complementary filter
+-   `espnow_sender.cpp` → ESP-NOW setup + send + send-callback
+
+Arduino-style equivalent:
+-   `src/senderJoystick/senderJoystick.ino`
+
+#### Vehicle (RX) --- `RedPanda4x4_receiver/src/`
+
+-   `main.cpp` → application entry point
+-   `espnow_receiver.cpp` → ESP-NOW receive callback + latest message storage
+-   `control_logic.cpp` → mixes manual/autonomous commands into actuators
+-   `auto_drive.cpp` → autonomous FSM (Forward / Stop / Scan / Back / Turn)
+-   `motor_tb6612.cpp` → TB6612 motor control
+-   `servo_cam.cpp` → camera pan servo control
+-   `servo_ultrasonic.cpp` → ultrasonic scan servo control
+-   `ir_sensor.cpp` → IR obstacle detection
+-   `display_oled.cpp` → vehicle OLED feedback (if present)
+-   `buzzer.cpp` → buzzer feedback (if present)
+
+Arduino-style equivalent:
+-   `src/macchina/macchina.ino`
+
+#### Monitor display
+
+Arduino sketch:
+-   `src/receiverMonitor/receiverMonitor.ino`\
+    Reads UART and shows decoded telemetry on a TFT screen (`TFT_eSPI`).
+
+#### Camera streaming (optional)
+
+-   `src/cam/app_httpd.cpp` → HTTP handlers (`/stream`, `/capture`, `/control`, `/status`, ...)\
+    This is the camera server core (based on Espressif camera web server).
+
+* * * * *
+
+How to Build, Flash, and Run
+-------------------------------------
+
+### A) PlatformIO (recommended)
+
+#### 1) Flash the controller (TX)
+
+1.  Open `RedPanda4x4_sender/` in VS Code (PlatformIO).
+2.  Select the correct **ESP32 board** and **serial port**.
+3.  Build and upload:
+    -   **PlatformIO GUI**: *Build* → *Upload*
+    -   or CLI:
+        `pio run -t upload`
+4.  In the controller code, ensure these match your setup:
+    -   Receiver MAC address (`RX_MAC`)
+    -   ESPNOW channel (`ESPNOW_CH`)
+    -   GPIO pins for joysticks/buttons/IMU/UART
   
-**Car (4x4)**  
-- **MSP432**:
-  - receives commands from the ESP32 via UART (local link on the car),
-  - handles the **TB6612FNG** motor driver,
-  - reads all **on-board sensors**,
-  - sends telemetry data back to the ESP32 (which then forwards it to the steering wheel).
+#### 2) Flash the vehicle (RX)
 
-This option uses the ESP32 mainly as *communication and UI unit*, while the MSP432 focuses on “bare-metal” control of actuators and sensors.
+1.  Open `RedPanda4x4_receiver/` in PlatformIO.
+2.  Select the correct board/port.
+3.  Upload:
+    `pio run -t upload`
 
----
+#### 3) Flash the monitor (optional)
 
-## 🧩 Main Features
+-   Flash `src/receiverMonitor/receiverMonitor.ino` on the display board (CYD / TFT ESP32).
 
-### 🎮 Steering Wheel / Controller
+#### 4) Flash the camera (optional)
 
-- **Steering angle** acquisition via gyroscope.
-- Control of:
-  - speed (throttle),
-  - direction (left/right),
-  - brake / emergency stop,
-  - modes (e.g. Eco, Sport, Auto line-following).
-- **Display**:
-  - estimated vehicle speed,
-  - distance to obstacles,
-  - battery status,
-  - temperature (e.g. ambient),
-  - connection status (link OK / lost).
-- **Communication**:
-  - UART between MSP432 ↔ ESP32 (if we use Option A),
-  - wireless link between steering wheel ↔ car (Wi-Fi/ESP-NOW).
+-   Build/flash the camera project that includes `app_httpd.cpp` (and WiFi credentials in the camera main file).
+-   After boot, open in a browser:
+    -   `http://<CAMERA_IP>/`
+    -   Stream: `http://<CAMERA_IP>/stream`
 
-### 🚗 4WD Car
+### B) Arduino IDE (alternative)
 
-- **Motor control** via TB6612FNG:
-  - independent control of left/right sides (or each wheel),
-  - PWM regulation for speed control,
-  - implementation of fast braking / emergency stop.
-- **Main sensors**:
-  - Ultrasonic sensor for obstacle detection (e.g. front distance),
-  - Line follower for following a predefined path on the ground,
-  - Temperature sensor (environment or components),
-  - Solar panel monitoring (generated voltage/current),
-  - Battery monitor (remaining voltage).
-- Possible modes:
-  - **Manual**: direct command from the steering wheel,
-  - **Assisted**: system automatically limits speed based on obstacles,
-  - **Line-Following**: vehicle follows the line autonomously, steering wheel may control only the speed.
+1.  Open the sketch you want:
+    -   Controller: `src/senderJoystick/senderJoystick.ino`
+    -   Vehicle: `src/macchina/macchina.ino`
+    -   Monitor: `src/receiverMonitor/receiverMonitor.ino`
+2.  Select **Board = ESP32** variant and the correct COM port.
+3.  Install required libraries (e.g., `TFT_eSPI`).
+4.  Upload.
 
----
+User Guide
+----------
 
-## 🔌 Communication
+### Controller (TX) controls
 
-- **UART**:
-  - between MSP432 and ESP32 (when present on the same unit),
-  - simple protocol (e.g. packets with header, message type, payload, checksum).
-- **Wireless (ESP32 ↔ ESP32 or ESP32 ↔ MSP)**:
-  - Evaluation of:
-    - **ESP-NOW** for low-latency peer-to-peer communication,
-    - or **Wi-Fi** with a custom protocol (e.g. UDP).
-- **Telemetry**:
-  - From steering wheel → car:
-    - steering angle, desired speed, operating mode.
-  - From car → steering wheel:
-    - current speed, obstacle distance, temperature, battery status, solar panel output, sensor status (line detected/not detected, etc.).
+-   **Mode button (Joystick 1 press)** cycles:
+    1.  **JOYSTICK mode**: drive with joystick X/Y
+    2.  **TILT mode**: drive by tilting the controller (IMU pitch/roll)
+    3.  **AUTO mode**: vehicle runs autonomous FSM (controller sends auto flag)
 
----
+-   **Drive joystick (Joystick 1)**
+    -   X axis → steering
+    -   Y axis → throttle forward/backward
+    -   Deadzone + rescaling are applied for stability
 
-## 🧪 Project Goals
+-   **Camera joystick (Joystick 2)**
 
-- Design and build a complete **embedded system** (hardware + firmware).
-- Implement:
-  - **real-time motor control**,
-  - acquisition and handling of **heterogeneous sensors**,
-  - **reliable communication** between remote units.
-- Integrate everything into a **working prototype** with an intuitive user interface (steering wheel with display and feedback).
+    -   X axis → camera pan command
+    -   **Joystick 2 press** → instantly center camera pan
 
----
+-   **Calibration**
+    -   At startup, joystick center is calibrated automatically (keep sticks centered).
 
-## 📁 Repository Structure (proposed)
+### Vehicle (RX) behavior
 
-```text
-RedPanda4x4/
-├─ docs/
-│  ├─ schematics/
-│  ├─ diagrams/
-│  └─ protocol.md
-├─ firmware/
-│  ├─ steering_msp432/
-│  ├─ steering_esp32/
-│  ├─ car_msp432/
-│  └─ car_esp32/
-├─ hardware/
-│  ├─ pcb/
-│  └─ wiring/
-└─ README.md
+-   In **manual modes**, the vehicle follows joystick/tilt commands received over ESP-NOW.
+-   In **AUTO mode**, the vehicle runs an **obstacle avoidance FSM**:
+    -   drives forward until obstacle
+    -   stops, scans, chooses a free direction
+    -   turns or backs up if blocked
 
+### Camera + Vision demo (optional)
+
+1.  Make sure the camera stream is reachable:
+    -   `http://<CAMERA_IP>/stream`
+2.  On the PC, run:
+    `python script.py`
+3.  The script:
+    -   decodes MJPEG frames
+    -   (optionally) rotates frames
+    -   runs YOLO ONNX every N frames for speed
+    -   draws bounding boxes on the live video
+
+Links
+-----
+
+-   **PowerPoint presentation**: *(add link here)*
+
+-   **YouTube video demo**: *(add link here)*
+
+Team Members & Contributions
+----------------------------
+
+-   **Member 1**:
+
+-   **Member 2**:
+
+-   **Member 3**:
