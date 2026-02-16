@@ -1,8 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
-/// Inizializza il sensore IR posteriore.
+/// Initializes the rear IR sensor.
 void irInit();
 
-/// Ritorna true se il sensore rileva un ostacolo dietro.
+/// Returns true if the sensor detects a rear obstacle.
 bool irBackObstacle();

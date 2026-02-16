@@ -4,6 +4,6 @@
 
 struct MotorCmd { int16_t left; int16_t right; };
 
-/// Converte ControlMsg (steer/throttle) in comandi left/right
-/// con deadzone, inversione assi, pivot e mixing arcade.
+/// Converts ControlMsg (steer/throttle) into left/right commands
+/// with deadzone, axis inversion, pivot and arcade mixing.
 MotorCmd accelToMotorsManual(const ControlMsg &a);

@@ -168,18 +168,18 @@ void loop() {
     steer = rollCmd;
 
   } else {
-    // MODE_AUTO: nessun comando manuale
+    // MODE_AUTO: no manual command
     outAx = 0; outAy = 0; steer = 0;
   }
 
   int outAz = camJoy.x();
   const char* dirTxt = dirTextFromSteer(steer);
 
-  // UART verso CYD monitor
+  // UART to CYD monitor
   Link.printf("D,%d,%d,%.1f,%.1f,%s\n",
               (int)g_mode, (btnPressed ? 1 : 0), pitchNow, rollNow, dirTxt);
 
-  // ---- Invio 20 Hz via ESP-NOW ----
+  // ---- Send at 20 Hz via ESP-NOW ----
   static uint32_t lastSendMs = 0;
   if (now - lastSendMs >= 50) {
     lastSendMs = now;

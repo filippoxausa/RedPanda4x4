@@ -1,19 +1,19 @@
 #pragma once
 #include <Arduino.h>
 
-/// Inizializza il servo del sensore ultrasuoni.
+/// Initializes the ultrasonic sensor servo.
 void servoUsInit();
 
-/// Posiziona il servo (limitato a min..max).
+/// Positions the servo (clamped to min..max).
 void servoUsWrite(int angleDeg);
 
-/// Inizializza i pin del HC-SR04.
+/// Initializes the HC-SR04 pins.
 void hcsr04Init();
 
-/// Legge la distanza in cm (999 se fuori range / timeout).
+/// Reads the distance in cm (999 if out of range / timeout).
 uint16_t hcsr04ReadCm();
 
-/// Satura distanze fuori [1..400] a 999.
+/// Clamps distances outside [1..400] to 999.
 uint16_t clampDist(uint16_t d);
 
 // Angle getters

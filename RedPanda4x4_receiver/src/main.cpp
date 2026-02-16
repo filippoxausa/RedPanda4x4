@@ -20,18 +20,18 @@
 static EspNowReceiver rx;
 static const uint32_t RX_TIMEOUT_MS = 250;
 
-// throttle del display per non saturare I2C
+// display throttle to avoid saturating I2C
 static uint32_t lastDispMs = 0;
 
-// costanti condivise con control_logic per la camera
+// constants shared with control_logic for the camera
 static const int AX_AY_MAX = 16200;
 
-// INVERT_THROTTLE_AXIS ripetuto qui per il blocco retro IR
+// INVERT_THROTTLE_AXIS repeated here for IR rear blocking
 static const bool INVERT_THROTTLE_AXIS = true;
 static const int  DEADZONE = 300;
 
 // =======================================================
-//                   Self-test iniziale
+//                   Initial self-test
 // =======================================================
 static void selfTest() {
   Serial.println("\n--- SELF TEST ---");
@@ -74,7 +74,7 @@ void setup() {
   irInit();
   buzzerInit();
 
-  // I2C per display OLED
+  // I2C for OLED display
   Wire.begin(21, 22);
 
   if (displayInit()) {
@@ -107,7 +107,7 @@ void loop() {
   const uint32_t now = millis();
   const bool backObs = irBackObstacle();
 
-  // ---- FAILSAFE: in manuale, stop se radio persa ----
+  // ---- FAILSAFE: in manual mode, stop if radio lost ----
   if (!msg.autoMode && ageMs > RX_TIMEOUT_MS) {
     motorsStop();
     servoUsWrite(servoUsCenterAngle());
@@ -125,7 +125,7 @@ void loop() {
 
   bool wantReverseBeep = false;
 
-  // ---- GUIDA AUTONOMA ----
+  // ---- AUTONOMOUS DRIVING ----
   if (msg.autoMode) {
     runAuto(backObs);
     servoCamSetTarget(90);
@@ -137,13 +137,13 @@ void loop() {
       else                  drawHappy();
     }
 
-  // ---- GUIDA MANUALE (joystick o tilt) ----
+  // ---- MANUAL DRIVING (joystick or tilt) ----
   } else {
     autoReset();
 
     MotorCmd m = accelToMotorsManual(msg);
 
-    // Blocco retro se IR vede ostacolo
+    // Block reverse if IR detects obstacle
     const int ayEff = INVERT_THROTTLE_AXIS ? -msg.ay : msg.ay;
     const bool wantReverse = (ayEff < -DEADZONE);
     wantReverseBeep = wantReverse;
@@ -156,22 +156,22 @@ void loop() {
 
     motorsSetSmooth(m.left, m.right);
 
-    // Servo US al centro in manuale
+    // US servo centered in manual mode
     servoUsWrite(servoUsCenterAngle());
 
-    // Camera da az
+    // Camera from az
     int az = clampInt((int)msg.az, -AX_AY_MAX, AX_AY_MAX);
     int camAng = mapInt(az, -AX_AY_MAX, AX_AY_MAX, 0, 180);
     servoCamSetTarget(camAng);
 
-    // Display: nome progetto
+    // Display: project name
     if (now - lastDispMs > 250) {
       lastDispMs = now;
       drawProjectName();
     }
   }
 
-  // ---- Buzzer retromarcia ----
+  // ---- Reverse buzzer ----
   buzzerUpdate(wantReverseBeep);
 
   // ---- Camera smoothing ----

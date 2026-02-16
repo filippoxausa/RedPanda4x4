@@ -5,9 +5,9 @@
 //                  Pin / LEDC config
 // =======================================================
 static const int PIN_BUZZER = 5;
-static const int BUZZ_CH    = 7;        // canale LEDC libero
+static const int BUZZ_CH    = 7;        // free LEDC channel
 static const int BUZZ_RES   = 10;
-static const int BUZZ_FREQ  = 2000;     // Hz (passivo)
+static const int BUZZ_FREQ  = 2000;     // Hz (passive)
 
 static const uint32_t BEEP_ON_MS  = 120;
 static const uint32_t BEEP_OFF_MS = 120;

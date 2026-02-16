@@ -1,14 +1,14 @@
 #pragma once
 #include <Arduino.h>
 
-/// Inizializza il display SSD1306. Ritorna false se non trovato.
+/// Initializes the SSD1306 display. Returns false if not found.
 bool displayInit();
 
-/// Disegna faccina felice (guida autonoma, nessun ostacolo).
+/// Draws a happy face (autonomous driving, no obstacle).
 void drawHappy();
 
-/// Disegna faccina triste (ostacolo rilevato).
+/// Draws a sad face (obstacle detected).
 void drawSad();
 
-/// Disegna il nome del progetto "RedPanda 4x4".
+/// Draws the project name "RedPanda 4x4".
 void drawProjectName();

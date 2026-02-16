@@ -10,8 +10,8 @@ static const int CH_SERVO_US  = 2;
 static const int PIN_TRIG = 18;
 static const int PIN_ECHO = 19;
 
-// Angoli di sweep
-static const int US_CENTER  = 40;   // angolo "dritto avanti"
+// Sweep angles
+static const int US_CENTER  = 40;   // "straight ahead" angle
 static const int US_MIN_ANG = 0;
 static const int US_MAX_ANG = 80;
 

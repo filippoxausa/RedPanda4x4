@@ -3,20 +3,20 @@
 #include <Arduino.h>
 
 // =======================================================
-//          Quick-fix switches (calibrazione)
+//          Quick-fix switches (calibration)
 // =======================================================
 static const bool INVERT_THROTTLE_AXIS = true;
 static const bool INVERT_STEER_AXIS    = false;
 
 // =======================================================
-//                   Costanti
+//                   Constants
 // =======================================================
 static const int AX_AY_MAX    = 16200;
 static const int DEADZONE     = 300;
 static const int THR_SNAP_PWM = 35;
 
 // =======================================================
-//                  Mixing manuale
+//                  Manual mixing
 // =======================================================
 
 MotorCmd accelToMotorsManual(const ControlMsg &a) {
@@ -36,7 +36,7 @@ MotorCmd accelToMotorsManual(const ControlMsg &a) {
 
   int left = 0, right = 0;
 
-  // Spin sul posto: throttle ~ 0 e steer forte
+  // Spin in place: throttle ~ 0 and strong steer
   const bool wantSpin = (thrPWM == 0) && (abs(steerPWM) > 60);
 
   if (wantSpin) {

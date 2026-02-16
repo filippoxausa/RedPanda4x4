@@ -42,7 +42,7 @@ bool EspNowReceiver::begin() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);
 
-  // Forza canale 1 — deve corrispondere al sender
+  // Force channel 1 — must match the sender
   esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
   Serial.println("[ESP-NOW] RX channel forced to 1");
 

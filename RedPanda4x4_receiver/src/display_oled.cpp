@@ -18,7 +18,7 @@ static Adafruit_SSD1306 oled(SCREEN_W, SCREEN_H, &Wire, -1);
 
 bool displayInit() {
   if (!oled.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
-    Serial.println("[OLED] init FAILED (addr 0x3C?). Prova 0x3D se non va.");
+    Serial.println("[OLED] init FAILED (addr 0x3C?). Try 0x3D if it doesn't work.");
     return false;
   }
   oled.clearDisplay();
@@ -28,10 +28,10 @@ bool displayInit() {
 
 void drawHappy() {
   oled.clearDisplay();
-  // occhi
+  // eyes
   oled.fillCircle(44, 24, 5, SSD1306_WHITE);
   oled.fillCircle(84, 24, 5, SSD1306_WHITE);
-  // sorriso
+  // smile
   oled.drawCircle(64, 44, 20, SSD1306_WHITE);
   oled.fillRect(44, 24, 40, 20, SSD1306_BLACK);
   oled.display();
@@ -39,10 +39,10 @@ void drawHappy() {
 
 void drawSad() {
   oled.clearDisplay();
-  // occhi
+  // eyes
   oled.fillCircle(44, 24, 5, SSD1306_WHITE);
   oled.fillCircle(84, 24, 5, SSD1306_WHITE);
-  // bocca triste
+  // sad mouth
   oled.drawCircle(64, 60, 20, SSD1306_WHITE);
   oled.fillRect(44, 60, 40, 20, SSD1306_BLACK);
   oled.display();

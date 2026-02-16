@@ -4,15 +4,15 @@
 #include "helpers.h"
 
 // =======================================================
-//                   Soglie e tempi
+//                   Thresholds and timings
 // =======================================================
-static const uint16_t AUTO_FRONT_TRIG_CM = 15;   // ostacolo frontale (cm)
-static const uint16_t AUTO_SIDE_FREE_CM  = 25;   // lato "libero" (cm)
+static const uint16_t AUTO_FRONT_TRIG_CM = 15;   // front obstacle (cm)
+static const uint16_t AUTO_SIDE_FREE_CM  = 25;   // "clear" side (cm)
 
 static const int16_t  AUTO_FWD_SPEED  = 160;
 static const int16_t  AUTO_BACK_SPEED = 150;
 
-// Curva ad arco: esterna veloce, interna lenta
+// Arc turn: outer wheel fast, inner wheel slow
 static const int16_t  AUTO_TURN_OUTER = 200;
 static const int16_t  AUTO_TURN_INNER = 60;
 static const uint32_t AUTO_TURN_MS    = 1100;
@@ -29,7 +29,7 @@ enum AutoState : uint8_t { A_FWD = 0, A_STOP, A_SCAN, A_BACK, A_TURN };
 
 static AutoState autoSt      = A_FWD;
 static uint32_t  autoTs      = 0;
-static int8_t    autoTurnDir = +1;     // +1 destra, -1 sinistra
+static int8_t    autoTurnDir = +1;     // +1 right, -1 left
 
 static uint16_t dL = 999, dR = 999;
 static uint8_t  scanPhase = 0;
@@ -61,7 +61,7 @@ void runAuto(bool backObs) {
 
   switch (autoSt) {
 
-    // ---- avanti dritto, controlla davanti ----
+    // ---- drive forward, check ahead ----
     case A_FWD: {
       servoUsWrite(servoUsCenterAngle());
       motorsSetSmooth(AUTO_FWD_SPEED, AUTO_FWD_SPEED);
@@ -76,7 +76,7 @@ void runAuto(bool backObs) {
       }
     } break;
 
-    // ---- breve pausa, poi scansione ----
+    // ---- brief pause, then scan ----
     case A_STOP: {
       motorsStop();
       servoUsWrite(servoUsCenterAngle());
@@ -90,7 +90,7 @@ void runAuto(bool backObs) {
       }
     } break;
 
-    // ---- scansione sinistra + destra, poi decisione ----
+    // ---- scan left + right, then decide ----
     case A_SCAN: {
       motorsStop();
       g_autoObstacle = true;
@@ -139,7 +139,7 @@ void runAuto(bool backObs) {
       }
     } break;
 
-    // ---- retromarcia, poi ri-scan ----
+    // ---- reverse, then re-scan ----
     case A_BACK: {
       g_autoObstacle = true;
       g_isReverseNow = true;
@@ -161,16 +161,16 @@ void runAuto(bool backObs) {
       }
     } break;
 
-    // ---- curva ad arco ----
+    // ---- arc turn ----
     case A_TURN: {
       g_autoObstacle = true;
       servoUsWrite(servoUsCenterAngle());
 
       int16_t Lm, Rm;
-      if (autoTurnDir > 0) {          // curva a destra
+      if (autoTurnDir > 0) {          // turn right
         Lm = AUTO_TURN_OUTER;
         Rm = AUTO_TURN_INNER;
-      } else {                         // curva a sinistra
+      } else {                         // turn left
         Lm = AUTO_TURN_INNER;
         Rm = AUTO_TURN_OUTER;
       }

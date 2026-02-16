@@ -1,14 +1,14 @@
 #pragma once
 #include <Arduino.h>
 
-/// Inizializza pin motori + LEDC + standby HIGH.
+/// Initializes motor pins + LEDC + standby HIGH.
 void motorsInit();
 
-/// Comanda direttamente i motori senza rampa (-255..+255).
+/// Drives motors directly without ramp (-255..+255).
 void motorsRaw(int16_t left, int16_t right);
 
-/// Comanda i motori con rampa anti-slip + limitazione differenziale.
+/// Drives motors with anti-slip ramp + differential limiting.
 void motorsSetSmooth(int16_t targetL, int16_t targetR);
 
-/// Equivale a motorsSetSmooth(0, 0).
+/// Equivalent to motorsSetSmooth(0, 0).
 void motorsStop();

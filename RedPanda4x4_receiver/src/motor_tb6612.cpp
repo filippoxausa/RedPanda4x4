@@ -2,7 +2,7 @@
 #include "helpers.h"
 
 // =======================================================
-//           Quick-fix switches (calibrazione)
+//           Quick-fix switches (calibration)
 // =======================================================
 static const bool INVERT_LEFT_MOTOR  = false;
 static const bool INVERT_RIGHT_MOTOR = true;
@@ -57,7 +57,7 @@ static void driveRight(int speed) {
 }
 
 // =======================================================
-//              Rampa anti-slip
+//              Anti-slip ramp
 // =======================================================
 static int16_t g_curL = 0, g_curR = 0;
 static const int16_t RAMP_STEP = 14;
@@ -100,7 +100,7 @@ void motorsSetSmooth(int16_t targetL, int16_t targetR) {
   targetL = constrain(targetL, -255, 255);
   targetR = constrain(targetR, -255, 255);
 
-  // Limitazione differenziale
+  // Differential limiting
   int diff = targetL - targetR;
   if (diff > DIFF_MAX) {
     int mid = (targetL + targetR) / 2;

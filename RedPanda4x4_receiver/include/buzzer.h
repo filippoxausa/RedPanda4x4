@@ -1,8 +1,8 @@
 #pragma once
 #include <Arduino.h>
 
-/// Inizializza il buzzer (LEDC).
+/// Initializes the buzzer (LEDC).
 void buzzerInit();
 
-/// Chiama ogni loop: se wantBeep=true emette beep intermittente (retromarcia).
+/// Call every loop: if wantBeep=true, emits intermittent beep (reverse).
 void buzzerUpdate(bool wantBeep);

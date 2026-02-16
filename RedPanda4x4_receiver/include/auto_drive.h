@@ -1,14 +1,14 @@
 #pragma once
 #include <Arduino.h>
 
-/// Resetta la macchina a stati (torna in A_FWD, servo al centro).
+/// Resets the state machine (back to A_FWD, servo centered).
 void autoReset();
 
-/// Esegue un tick della guida autonoma. backObstacle = sensore IR posteriore.
+/// Executes one tick of autonomous driving. backObstacle = rear IR sensor.
 void runAuto(bool backObstacle);
 
-/// True se l'auto vede un ostacolo (per il display).
+/// True if the car sees an obstacle (for the display).
 bool autoIsObstacle();
 
-/// True se l'auto sta andando in retromarcia (per il buzzer).
+/// True if the car is reversing (for the buzzer).
 bool autoIsReversing();

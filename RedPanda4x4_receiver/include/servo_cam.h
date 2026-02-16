@@ -1,14 +1,14 @@
 #pragma once
 #include <Arduino.h>
 
-/// Inizializza il servo della camera.
+/// Initializes the camera servo.
 void servoCamInit();
 
-/// Imposta l'angolo target (lo smoothing avviene in servoCamUpdate).
+/// Sets the target angle (smoothing happens in servoCamUpdate).
 void servoCamSetTarget(int angleDeg);
 
-/// Chiama ogni loop: avanza di 1 grado verso il target ogni 35 ms.
+/// Call every loop: advances 1 degree toward the target every 35 ms.
 void servoCamUpdate();
 
-/// Angolo attuale del servo.
+/// Current servo angle.
 int servoCamCurrent();
