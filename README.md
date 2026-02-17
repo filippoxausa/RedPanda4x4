@@ -70,7 +70,7 @@ Requirements
 | HC-SR04 Pin | Connects to | Notes |
 |---|---|---|
 | TRIG | ESP32 GPIO18 | Digital output |
-| ECHO | ESP32 GPIO19 |
+| ECHO | ESP32 GPIO19 | **ECHO is 5V** → we are not using a **voltage divider / level shifter** to 3.3V |
 | VCC | + 4×AA battery pack | Sensor power |
 | GND | Common GND | Shared ground |
 
@@ -78,7 +78,7 @@ Requirements
 | IR Sensor Pin | Connects to | Notes |
 |---|---|---|
 | OUT | ESP32 GPIO23 | Read with `INPUT_PULLUP` (active LOW) |
-| VCC | ESP32 3.3V | 
+| VCC | ESP32 3.3V | - |
 | GND | Common GND | Shared ground |
 
 **OLED I2C (SSD1306 128×64)**
@@ -101,7 +101,6 @@ Requirements
 |---|---:|---|---|
 | Ultrasonic scan servo (MG 90g) | GPIO33 | ESP32 3.3V (as wired) | PWM signal from ESP32 |
 | Camera pan servo | GPIO32 | ESP32 3.3V (as wired) | PWM signal from ESP32 |
-
 
 **Power rails summary (RX)**
 | Rail | Source | Powers |
@@ -210,20 +209,10 @@ RedPanda4x4
 │   │   └── mpu6500_reader.cpp        # IMU init + complementary filter
 ├── src                               # Arduino-style copies / additional sketches (camera, monitor, etc.)
 │   ├── cam
-│   │   ├── app_httpd.cpp
 │   │   ├── camera_pins.h
-│   │   ├── export_onnx.py
 │   │   ├── script.py
-│   ├── macchina
-│   │   └── macchina.ino
 │   ├── receiverMonitor
-│   │   └── receiverMonitor.ino
-│   └── senderJoystick
-│       ├── app_httpd.cpp
-│       ├── camera_pins.h
-│       ├── ci.json
-│       ├── partitions.csv
-│       └── senderJoystick.ino
+│       └── receiverMonitor.ino
 ├── LICENSE
 └── README.md
 ```
