@@ -327,6 +327,6 @@ Links
 -----
 
 - **PowerPoint presentation**: *(https://docs.google.com/presentation/d/1fTfeVSfemBiTMKqylM_2xex5caF504tukKaZ9YwD_rQ/edit?usp=sharing)*
-- **YouTube video demo**: *(add link here)*
+- **YouTube video demo**: *(www.youtube.com/watch?v=iV_uJD73mQ0 due to privacy problems our channel is currently unavailable, we'll fix in the next days if it's necessary)*
 
 **Team members**: *Boarini Andrea*, *Calliari Michele*, *Carbonari Ismaele*, *Xausa Filippo*
