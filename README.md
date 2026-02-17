@@ -47,8 +47,7 @@ Requirements
 **Firmware**
 
 -   **VS Code + PlatformIO** (recommended)
-    -   or Arduino IDE with ESP32 core installed
--   ESP32 board support package (Arduino core / PlatformIO platform)
+-   ESP32 board support package (PlatformIO platform)
 -   Libraries used in the sketches/projects (typical):
     -   `esp_now`, `WiFi`, `Wire`
     -   `TFT_eSPI` (monitor display)
@@ -131,7 +130,7 @@ RedPanda4x4
 How to Build, Flash, and Run
 -------------------------------------
 
-### A) PlatformIO (recommended)
+### PlatformIO (recommended)
 
 #### 1) Flash the controller (TX)
 
@@ -165,16 +164,6 @@ How to Build, Flash, and Run
 -   After boot, open in a browser:
     -   `http://<CAMERA_IP>/`
     -   Stream: `http://<CAMERA_IP>/stream`
-
-### B) Arduino IDE (alternative)
-
-1.  Open the sketch you want:
-    -   Controller: `src/senderJoystick/senderJoystick.ino`
-    -   Vehicle: `src/macchina/macchina.ino`
-    -   Monitor: `src/receiverMonitor/receiverMonitor.ino`
-2.  Select **Board = ESP32** variant and the correct COM port.
-3.  Install required libraries (e.g., `TFT_eSPI`).
-4.  Upload.
 
 User Guide
 ----------
@@ -248,15 +237,8 @@ A_TURN → A_FWD after completing the turn (resume forward motion).
 Links
 -----
 
--   **PowerPoint presentation**: *(add link here)*
+-   **PowerPoint presentation**: *(https://docs.google.com/presentation/d/1fTfeVSfemBiTMKqylM_2xex5caF504tukKaZ9YwD_rQ/edit?usp=sharing)*
 
 -   **YouTube video demo**: *(add link here)*
 
-Team Members & Contributions
-----------------------------
-
--   **Member 1**:
-
--   **Member 2**:
-
--   **Member 3**:
+**Team members**: *Boarini Andrea*, *Calliari Michele*, *Carbonari Ismaele*, *Xausa Filippo*
